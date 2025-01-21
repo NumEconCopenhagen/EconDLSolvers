@@ -1,0 +1,207 @@
+Timer unit: 1e-07 s
+
+Total time: 30.2784 s
+File: \\unicph.domain\users\gmf123\imperfectproblemsolving\econdlsolvers\EconDLSolvers\DLSolver.py
+Function: solve at line 632
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   632                                               def solve(self,do_print=False,do_print_all=False,show_memory=False,postfix=''):
+   633                                                   """ solve model """
+   634                                           
+   635         1         99.0     99.0      0.0          if not torch.cuda.is_available(): show_memory = False
+   636                                           
+   637         1     113924.0 113924.0      0.0          timestamp = solving_json(postfix)
+   638         1         42.0     42.0      0.0          t0_solve = time.perf_counter()
+   639                                           
+   640         1         10.0     10.0      0.0          if do_print_all: do_print = True
+   641         1          9.0      9.0      0.0          if do_print: print(f"started solving: {timestamp}")
+   642                                           
+   643                                                   # a. unpack
+   644         1         14.0     14.0      0.0          sim = self.sim
+   645         1         11.0     11.0      0.0          train = self.train
+   646         1         13.0     13.0      0.0          info = self.info
+   647                                                   
+   648         1         19.0     19.0      0.0          if train.terminate_on_policy_loss: assert not train.only_time_termination, 'not implemented'
+   649                                           
+   650         1         10.0     10.0      0.0          if show_memory: 
+   651                                                       free_GB_ini = get_free_memory(train.device)
+   652                                                       print(f'initial: {free_GB_ini:.2f}GB free')
+   653                                           
+   654         1         17.0     17.0      0.0          if 'solve_in_progress' in self.info:
+   655                                                       continued_solve = True
+   656                                                   else:
+   657         1         27.0     27.0      0.0              self.info['solve_in_progress'] = True
+   658         1         10.0     10.0      0.0              continued_solve = False
+   659                                           
+   660         1         11.0     11.0      0.0          if not continued_solve:
+   661         1         21.0     21.0      0.0              self.info['time'] = 0.0
+   662         1         13.0     13.0      0.0              self.info['time.update_NN'] = 0.0
+   663         1         11.0     11.0      0.0              self.info['time.update_NN.train_value'] = 0.0
+   664         1         11.0     11.0      0.0              self.info['time.update_NN.train_policy'] = 0.0
+   665         1         21.0     21.0      0.0              self.info['time.scheduler'] = 0.0
+   666         1         12.0     12.0      0.0              self.info['time.convergence'] = 0.0
+   667         1         11.0     11.0      0.0              self.info['time.update_best'] = 0.0
+   668         1         11.0     11.0      0.0              self.info['time._simulate_training_sample'] = 0.0
+   669         1         11.0     11.0      0.0              self.info['time.simulate_R'] = 0.0
+   670                                           
+   671                                                   # b. initialize best
+   672         1         10.0     10.0      0.0          if not continued_solve:
+   673                                           
+   674         1         53.0     53.0      0.0              best = info['best'] = SimpleNamespace()
+   675         1         25.0     25.0      0.0              best.k = -1		
+   676         1         11.0     11.0      0.0              best.time = 0.0
+   677         1         27.0     27.0      0.0              best.R = -np.inf
+   678         1         14.0     14.0      0.0              best.policy_NN = None
+   679         1         18.0     18.0      0.0              best.value_NN = None
+   680                                           
+   681                                                   else:
+   682                                           
+   683                                                       best = info['best']
+   684                                                       
+   685                                                   # c. loop over iterations
+   686         1         11.0     11.0      0.0          if not continued_solve:
+   687         1        719.0    719.0      0.0              epsilon_sigma = info['epsilon_sigma'] = deepcopy(train.epsilon_sigma)
+   688         1         19.0     19.0      0.0              k = 0
+   689                                                   else:
+   690                                                       epsilon_sigma = info['epsilon_sigma']
+   691                                                       k = info['iter']
+   692                                           
+   693                                                   while True:
+   694                                                       
+   695       131       3863.0     29.5      0.0              t0_k = time.perf_counter()
+   696       131       1718.0     13.1      0.0              train.k = k
+   697                                           
+   698       131       2689.0     20.5      0.0              info[('value_epochs',k)] = 0 # keep track of number of value epochs (updated in algo)
+   699       131       1465.0     11.2      0.0              info[('policy_epochs',k)] = 0 # keep track of number of policy epochs (updated in algo)
+   700                                           
+   701                                                       # i. simulate training sample
+   702       131       1475.0     11.3      0.0              do_exo_actions = k < train.do_exo_actions_periods # exo actions defined in draw_exo_actions
+   703       131    6648159.0  50749.3      2.2              self._simulate_training_sample(epsilon_sigma,do_exo_actions)
+   704                                                       
+   705                                                       # update exploration
+   706       131       1134.0      8.7      0.0              if epsilon_sigma is not None:
+   707       131      30492.0    232.8      0.0                  epsilon_sigma *= train.epsilon_sigma_decay
+   708       131       5871.0     44.8      0.0                  epsilon_sigma = np.fmax(epsilon_sigma,train.epsilon_sigma_min)
+   709                                           
+   710                                                       # ii. update neural nets
+   711       131       1288.0      9.8      0.0              t0 = time.perf_counter()
+   712       131  278544897.0    2e+06     92.0              self.algo.update_NN(self) # is different for each algorithm
+   713       131       2464.0     18.8      0.0              info['time.update_NN'] += time.perf_counter() - t0
+   714                                           
+   715                                                       # iii. scheduler step
+   716       131        845.0      6.5      0.0              t0 = time.perf_counter()
+   717       131      41142.0    314.1      0.0              self.algo.scheduler_step(self)
+   718       131       1524.0     11.6      0.0              info['time.scheduler'] += time.perf_counter() - t0
+   719                                           
+   720                                                       # iv. print and termination
+   721       131       2055.0     15.7      0.0              info[('k_time',k)] = time.perf_counter()-t0_solve + info['time']
+   722       131       1659.0     12.7      0.0              if not train.sim_R_freq is None and k % train.sim_R_freq == 0:
+   723                                           
+   724                                                           # o. update best
+   725        14   12966120.0 926151.4      4.3                  self._update_best()
+   726                                           
+   727                                                           # oo. print
+   728        14         93.0      6.6      0.0                  if do_print: self._print_progress(t0_k,t0_solve)
+   729                                           
+   730                                                           # ooo. convergence
+   731        14        171.0     12.2      0.0                  t0 = time.perf_counter()
+   732                                                           
+   733        14    1105356.0  78954.0      0.4                  terminate = self.convergence(postfix=postfix)
+   734        14        873.0     62.4      0.0                  info['time.convergence'] += time.perf_counter() - t0
+   735                                           
+   736                                                           # oooo. termination
+   737        14        562.0     40.1      0.0                  if info[('k_time',k)]/60 > train.K_time_min: # above minimum time
+   738                                                               if terminate: break # convergence criterion satisfied
+   739                                                       
+   740                                                       else:
+   741                                           
+   742       117       1864.0     15.9      0.0                  info[('R',k)] = np.nan		
+   743       117        454.0      3.9      0.0                  if do_print_all: self._print_progress(t0_k,t0_solve)
+   744                                                       
+   745                                                       # v. termination from policy loss
+   746       131       1164.0      8.9      0.0              if train.terminate_on_policy_loss and info[('policy_loss',k)] < train.tol_policy_loss:
+   747                                                           self._update_best() # final update
+   748                                                           k += 1
+   749                                                           print(f'Terminating after {k} iter, policy loss lower than tolerance')
+   750                                                           break
+   751                                                       
+   752                                                       # vi. termination from time
+   753       131       1798.0     13.7      0.0              time_tot = (time.perf_counter()-t0_solve)/60 + info['time']/60
+   754       131       1047.0      8.0      0.0              if time_tot > train.K_time:
+   755         1      90861.0  90861.0      0.0                  self._update_best() # final update
+   756         1         12.0     12.0      0.0                  k += 1
+   757         1       1181.0   1181.0      0.0                  print(f'Terminating after {k} iter, max time {train.K_time} mins reached')
+   758         1          6.0      6.0      0.0                  break
+   759                                                           
+   760                                                       # vii. check if solving.json has been updated for manual termination
+   761       130    3118296.0  23986.9      1.0              manuel_terminate = check_solving_json(timestamp)
+   762       130       1362.0     10.5      0.0              if manuel_terminate:
+   763                                                           self._update_best() # final update
+   764                                                           k += 1
+   765                                                           print(f'Terminating after {k} iter, manuel termination')
+   766                                                           break
+   767                                           
+   768                                                       # vii. terminate from too many iterations
+   769       130       2343.0     18.0      0.0              k += 1
+   770       130       2901.0     22.3      0.0              if k >= train.K: 
+   771                                                           self._update_best() # final update
+   772                                                           print(f'Terminating after {k} iter, max number of iterations reached')
+   773                                                           break            
+   774                                           
+   775                                                   # d. load best solution
+   776         1         11.0     11.0      0.0          t0 = time.perf_counter()
+   777                                           
+   778         1          8.0      8.0      0.0          if self.policy_NN is not None: 
+   779         1          7.0      7.0      0.0              if not best.policy_NN is None:
+   780         1       8327.0   8327.0      0.0                  self.policy_NN.load_state_dict(best.policy_NN)
+   781                                                   
+   782         1         11.0     11.0      0.0          if self.value_NN is not None: 
+   783                                                       if not best.value_NN is None:
+   784                                                           self.value_NN.load_state_dict(best.value_NN)
+   785                                                               
+   786         1         21.0     21.0      0.0          info['time.update_best'] += time.perf_counter() - t0
+   787                                           
+   788                                                   # e. final simulation
+   789         1          8.0      8.0      0.0          t0 = time.perf_counter()
+   790         1      68007.0  68007.0      0.0          self.simulate_R()
+   791         1         15.0     15.0      0.0          info['time.update_best'] += time.perf_counter() - t0
+   792                                           
+   793                                                   # f. store
+   794         1         12.0     12.0      0.0          info['R'] = best.R
+   795         1         12.0     12.0      0.0          info['time'] += time.perf_counter()-t0_solve
+   796         1          7.0      7.0      0.0          info['iter'] = k
+   797         1       1859.0   1859.0      0.0          info[('value_epochs','mean')] = np.mean([info[('value_epochs',k)] for k in range(info['iter'])])
+   798         1        980.0    980.0      0.0          info[('policy_epochs','mean')] = np.mean([info[('policy_epochs',k)] for k in range(info['iter'])])
+   799                                           
+   800         1          6.0      6.0      0.0          if do_print: self.show_info()
+   801                                           
+   802                                                   # g. extra: multiples simulations of R
+   803         1          7.0      7.0      0.0          if do_print and self.sim.reps > 0: print('Simulating multiple Rs')
+   804         1        289.0    289.0      0.0          Rs = self.simulate_Rs()
+   805         1          9.0      9.0      0.0          info['Rs'] = Rs
+   806                                               
+   807                                                   # h. extra: simulation with epsilon shocks
+   808         1          8.0      8.0      0.0          if train.do_sim_eps and not epsilon_sigma is None:
+   809                                           
+   810                                                       if do_print: print('Simulating with exploration')
+   811                                           
+   812                                                       self.sim_eps = deepcopy(sim)
+   813                                                       eps = self.draw_exploration_shocks(epsilon_sigma,self.sim_eps.N).to(train.dtype).to(train.device)
+   814                                                       simulate(self,self.sim_eps,eps=eps) # note: same initial states and shocks as in .sim are used
+   815                                           
+   816                                                   else:
+   817                                           
+   818         1         20.0     20.0      0.0              self.sim_eps = None
+   819                                                   
+   820                                                   # h. empty cache
+   821         1          6.0      6.0      0.0          if show_memory: 
+   822                                                       free_GB_fin = get_free_memory(train.device)
+   823                                                       print(f'solve(): {free_GB_ini-free_GB_fin:.2f}GB allocated')
+   824                                           
+   825         1         88.0     88.0      0.0          if torch.cuda.is_available(): torch.cuda.empty_cache()
+   826                                           
+   827         1          7.0      7.0      0.0          if show_memory:
+   828                                                       free_GB_after = get_free_memory(train.device)
+   829                                                       print(f'empty_cache(): {free_GB_fin-free_GB_after:.2f}GB deallocated')
+   830                                                       print(f'final: {free_GB_after:.2f}GB free')
