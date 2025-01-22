@@ -117,7 +117,7 @@ def compute_target(model,states_pd):
 			actions_plus = model.eval_policy(policy_NN,states_plus,t0=1)
 
 		# iii. future reward
-		outcomes_plus = model.outcomes(states_plus,actions_plus)
+		outcomes_plus = model.outcomes(states_plus,actions_plus,t0=1)
 		reward_plus = model.reward(states_plus,actions_plus,outcomes_plus,t0=1).reshape(-1,train.Nquad)
 		
 		# iv. future post decision states
