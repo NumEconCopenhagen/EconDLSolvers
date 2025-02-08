@@ -149,7 +149,7 @@ class StateValue(nn.Module):
         
         super(StateValue, self).__init__()
 
-        if train.algoname == 'DeepVPD':
+        if train.algoname == 'DeepVPD' or train.algoname == 'DeepVPDDC':
             self.Nstates = par.Nstates_pd
         else:
             self.Nstates = par.Nstates

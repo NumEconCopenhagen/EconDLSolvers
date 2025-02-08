@@ -35,6 +35,9 @@ def setup(model):
 	train.k_min = 500 # minimum number of iterations
 	train.Delta_k = 200 # number of iterations without improvement before termination
 
+
+	train.start_train_policy = -1
+
 	# d. not used
 	train.batch_size  = None
 	train.clip_grad_value = None
@@ -52,7 +55,6 @@ def setup(model):
 	train.Nepochs_policy = None
 	train.Nepochs_value = None
 	train.Nneurons_value = None
-	train.start_train_policy = None
 	train.tau = None
 	train.use_target_policy = None
 	train.use_target_value = None	

@@ -5,7 +5,6 @@
 
 namespace utility {
 
-
 double func(double c, double d, par_struct* par){ // utility function
 
     double utility_c = pow(c,par->alpha);

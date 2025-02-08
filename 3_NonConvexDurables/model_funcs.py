@@ -33,12 +33,6 @@ def outcomes(model,states,actions,t0=0,t=None):
 	mbar = m + (1-par.kappa)*n
 
 	# c. utility	
-	# c_keep = (1-actions[...,0])*m
-	# d_keep = n
-
-	# c_adj = (1-actions[...,1])*mbar
-	# d_adj = (1-actions[...,2])*actions[...,1]*mbar
-
 	c_keep = (1-actions[...,0])*m
 	d_keep = n
 
@@ -76,11 +70,9 @@ def discount_factor(model,states,t0=0,t=None):
 	
 	return beta 
 
-
 def exploration(model,states,actions,eps,t=None):
 
 	return actions + eps
-
 
 def terminal_reward_pd(model,states_pd):
 	""" terminal reward """
@@ -105,6 +97,7 @@ def terminal_reward_pd(model,states_pd):
 def state_trans_pd(model,states,actions,outcomes,t0=0,t=None):
 
 	par = model.par
+
 	# a. unpack
 	m = states[...,0]
 	p = states[...,1]
@@ -115,12 +108,6 @@ def state_trans_pd(model,states,actions,outcomes,t0=0,t=None):
 
 	# c. post-decision states
 	p_pd_adj = p_pd_keep = p
-
-	# m_pd_keep = m*actions[...,0]
-	# n_pd_keep = n
-
-	# m_pd_adj = actions[...,2]*actions[...,1]*mbar
-	# n_pd_adj = (1-actions[...,2])*actions[...,1]*mbar
 
 	m_pd_keep = actions[...,0]*m
 	n_pd_keep = n
@@ -203,6 +190,7 @@ def eval_equations_DeepVPDDC(model,states,actions,marginal_reward,q):
 
 	# a. borrowing constraint
 	constraint = actions[:-1,:,:2]
+
 	# b. compute euler equation
 	FOC = marginal_reward[:-1] / (par.R*par.beta*q) - 1
 
@@ -210,7 +198,6 @@ def eval_equations_DeepVPDDC(model,states,actions,marginal_reward,q):
 	eq_error = fischer_burmeister(FOC,constraint)
 
 	return eq_error**2
-
 
 def fischer_burmeister(a,b):
 	""" Fischer-Burmeister function - torch """

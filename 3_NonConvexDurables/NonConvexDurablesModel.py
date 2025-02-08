@@ -20,9 +20,9 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		sim = self.sim
 
 		par.full = full if full is not None else torch.cuda.is_available()
+		par.seed = 1 # seed for random number generator in torch
 
 		# a. model
-		par.seed = 1 # seed for random number generator in torch
 
 		# horizon
 		if par.full:
@@ -34,7 +34,6 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		par.beta = 0.965 # discount factor
 		par.alpha = 0.9 # weight on non-durable consumption
 		par.d_ubar = 1e-2 # minimum consumption
-		# par.d_ubar = 0.0 # minimum consumption
 		par.rho = 2.0 # risk aversion
 
 		# return, durable good and ince income
@@ -50,9 +49,7 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		par.Npsi = 4 # number of transitory income shocks - quadrature
 
 		# taste shocks
-		# par.sigma_eps = 0.000001
 		par.sigma_eps = 0.1
-		# par.sigma_eps = 0.2
 
 		# number of states, shocks and actions
 		par.Nstates = 3 # number of states
@@ -64,6 +61,7 @@ class NonConvexDurablesModelClass(DLSolverClass):
 
 		# b. simulation of life-time-reward
 		sim.N = 50_000 # number of agents
+		sim.reps = 0 # number of repetitions
 
 		# initial states
 		par.mu_m0 = 1.0 
@@ -83,7 +81,10 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		dtype = train.dtype	
 		device = train.device
 
-		# b. quad
+		# b. dependent parameters
+		par.gumbell_param = get_scale_from_variance(par.sigma_eps)
+
+		# c. quad
 		par.xi, par.xi_w = log_normal_gauss_hermite(par.sigma_xi, par.Nxi)
 		par.psi, par.psi_w = log_normal_gauss_hermite(par.sigma_psi, par.Npsi)
 
@@ -92,7 +93,7 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		par.xi_w = torch.tensor(par.xi_w,dtype=dtype,device=device)
 		par.xi = torch.tensor(par.xi,dtype=dtype,device=device)		
 
-		# c. simulation
+		# d. simulation
 		sim.states = torch.zeros((par.T,sim.N,par.Nstates),dtype=dtype,device=device)
 		sim.states_pd = torch.zeros((par.T,sim.N,par.Nstates_pd),dtype=dtype,device=device)
 		sim.shocks = torch.zeros((par.T,sim.N,par.Nshocks),dtype=dtype,device=device)
@@ -100,16 +101,12 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		sim.actions = torch.zeros((par.T,sim.N,par.Nactions),dtype=dtype,device=device) 
 		sim.reward = torch.zeros((par.T,sim.N,par.NDC),dtype=dtype,device=device)
 		
-		sim.taste_shocks = torch.zeros((par.T,sim.N,par.NDC),dtype=dtype,device=device)
-		par.gumbell_param = get_scale_from_variance(par.sigma_eps)
+		sim.taste_shocks = torch.zeros((par.T,sim.N,par.NDC),dtype=dtype,device=device)		
 		sim.DC = torch.zeros((par.T,sim.N),dtype=dtype,device=device)
 		
 		sim.adj = torch.zeros((par.T,sim.N),dtype=dtype,device=device)
 		sim.c = torch.zeros((par.T,sim.N),dtype=dtype,device=device)
 		sim.d = torch.zeros((par.T,sim.N),dtype=dtype,device=device)
-
-
-		
 
 	#########
 	# train #
@@ -137,12 +134,10 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		train.max_actions = torch.tensor([0.9999,0.9999,0.9999],dtype=dtype,device=device) # maximum action value
 
 		# d. misc
-		train.start_train_policy = 50
-
-		train.N_value_NN = 3
-
-		train.use_FOC=False
-		train.NFOC_targets = 1
+		train.start_train_policy = 50 # start training policy net
+		train.N_value_NN = 3 # number of value nets
+		train.use_FOC = False # use first order conditions
+		train.NFOC_targets = 1 # number of targets in FOC
 		
 	def allocate_train(self):
 		""" allocate memory training """
@@ -153,16 +148,17 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		detype = train.dtype
 		device = train.device
 
-		# a. numpy - data
+		# a. dependent settings
+
+		# b. training samples
 		train.states = torch.zeros((par.T,train.N,par.Nstates),dtype=detype,device=device)
 		train.states_pd = torch.zeros((par.T,train.N,par.Nstates_pd),dtype=detype,device=device)
 		train.shocks = torch.zeros((par.T,train.N,par.Nshocks),dtype=detype,device=device)
+		train.taste_shocks = torch.zeros((par.T,train.N,par.NDC),dtype=detype,device=device)
 		train.outcomes = torch.zeros((par.T,train.N,par.Noutcomes),dtype=detype,device=device)
+		train.DC = torch.zeros((par.T,train.N),dtype=detype,device=device)
 		train.actions = torch.zeros((par.T,train.N,par.Nactions),dtype=detype,device=device) 
 		train.reward = torch.zeros((par.T,train.N,par.NDC),dtype=detype,device=device)
-
-		train.taste_shocks = torch.zeros((par.T,train.N,par.NDC),dtype=detype,device=device)
-		train.DC = torch.zeros((par.T,train.N),dtype=detype,device=device)
 		
 	#########
 	# draw #
@@ -183,7 +179,6 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		n0 = par.mu_n0*torch.exp(torch.normal(-0.5*par.sigma_n0**2,par.sigma_n0,size=(N,)))
 
 		return torch.stack((m0,p0,n0),dim=-1)
-
 
 	def draw_shocks(self,N):
 		""" draw shocks """
@@ -275,7 +270,7 @@ class NonConvexDurablesModelClass(DLSolverClass):
 		sim.d[~sim.adj] = sim.outcomes[...,1][~sim.adj]
 		sim.d[sim.adj] = sim.outcomes[...,3][sim.adj]
 
-
 def get_scale_from_variance(sigma):
 	""" get scale from variane """
-	return sigma * np.sqrt(6) / np.pi
+
+	return sigma*np.sqrt(6)/np.pi

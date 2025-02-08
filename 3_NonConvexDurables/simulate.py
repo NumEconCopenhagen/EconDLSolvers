@@ -1,13 +1,8 @@
 import numpy as np
 from consav.linear_interp import interp_3d
 
-
-
-
-def simulate(par,egm,sim):
+def simulate(par,vfi,sim):
 	""" simulate model """
-
-	# final=True: extra output is produced
 
 	# a. unpack
 	states = sim.states # shape (T,N,Nstates)
@@ -36,35 +31,41 @@ def simulate(par,egm,sim):
 	# b. time loop  
 	for t in range(par.T):
 
-
 		# i. discrete choice
 		value_adj = np.zeros((sim.N))
 		value_keep = np.zeros((sim.N))
+
 		for i in range(sim.N):
-			value_adj[i] = interp_3d(egm.p_grid,egm.n_grid,egm.m_grid,egm.sol_v_adj[t],p[t,i],n[t,i],m[t,i])
-			value_keep[i] = interp_3d(egm.p_grid,egm.n_grid,egm.m_grid,egm.sol_v_keep[t],p[t,i],n[t,i],m[t,i])
+			value_adj[i] = interp_3d(vfi.p_grid,vfi.n_grid,vfi.m_grid,vfi.sol_v_adj[t],p[t,i],n[t,i],m[t,i])
+			value_keep[i] = interp_3d(vfi.p_grid,vfi.n_grid,vfi.m_grid,vfi.sol_v_keep[t],p[t,i],n[t,i],m[t,i])
+
 		value_keep += taste_shocks[t,:,0]
 		value_adj += taste_shocks[t,:,1]
+
 		DC[t] = value_adj > value_keep
 		
-		# ii. cont. choice
+		# ii. continous choice
 		for i in range(sim.N):
 			
-			# cotnichoices
+			# continous choices
 			if DC[t,i] == 0: # keep
-				sav_share = interp_3d(egm.p_grid,egm.n_grid,egm.m_grid,egm.sol_sav_share_keep[t],p[t,i],n[t,i],m[t,i])
+
+				sav_share = interp_3d(vfi.p_grid,vfi.n_grid,vfi.m_grid,vfi.sol_sav_share_keep[t],p[t,i],n[t,i],m[t,i])
 				sav_share = np.clip(sav_share,0.0,0.9999)
 				c[t,i] = (1-sav_share)*m[t,i]
 				d[t,i] = n[t,i]
+
 			else: # adjust
-				exp_share = interp_3d(egm.p_grid,egm.n_grid,egm.m_grid,egm.sol_exp_share_adj[t],p[t,i],n[t,i],m[t,i])
+
+				exp_share = interp_3d(vfi.p_grid,vfi.n_grid,vfi.m_grid,vfi.sol_exp_share_adj[t],p[t,i],n[t,i],m[t,i])
 				exp_share = np.clip(exp_share,0.0,0.9999)
-				c_share = interp_3d(egm.p_grid,egm.n_grid,egm.m_grid,egm.sol_c_share_adj[t],p[t,i],n[t,i],m[t,i])
+				c_share = interp_3d(vfi.p_grid,vfi.n_grid,vfi.m_grid,vfi.sol_c_share_adj[t],p[t,i],n[t,i],m[t,i])
 				c_share = np.clip(c_share,1e-8,1.0)
 
 				exp_adjustment = (1-exp_share)*(m[t,i]+(1-par.kappa)*n[t,i])
 				c[t,i] = c_share*exp_adjustment
 				d[t,i] = (1-c_share)*exp_adjustment
+
 		# iii. reward
 		c_util = c[t]**(par.alpha)
 		d_util = (d[t]+par.d_ubar)**(1-par.alpha)
@@ -90,6 +91,3 @@ def simulate(par,egm,sim):
 			m[t+1] = par.R*a[t] + y
 
 			n[t+1] = n_pd[t] * (1-par.delta)
-
-	
-			

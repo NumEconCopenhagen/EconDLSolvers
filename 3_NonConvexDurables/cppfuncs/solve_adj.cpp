@@ -3,20 +3,14 @@
 #include "header.cpp"
 #endif
 
-
-
-
-
 double obj_adj(double *choices, void *solver_data_in){ 
     
     solver_struct *solver_data = (solver_struct *) solver_data_in;
     solver_data->func_evals += 1;
 
-    // log that this is a call
-    // logs::write("log.txt",1,"obj_adj called\n");
     // i. unpack
     auto par = solver_data->par;
-    auto egm = solver_data->egm;
+    auto vfi = solver_data->vfi;
     long long t = solver_data->t;
     double n = solver_data->n;
     double m = solver_data->m;
@@ -25,41 +19,39 @@ double obj_adj(double *choices, void *solver_data_in){
     // ii. compute mbar
     double mbar = m + (1-par->kappa)*n;
 
-    // log choices
-    // logs::write("log.txt",1,"choices in objective: choice[0] = %.7f, choices[1] = %.7f\n",choices[0],choices[1]);
-    
-    
-    // ii. compute choices
+    // iii. compute choices
     double c,d, a;
     double exp_share  = choices[0];
     double c_share = choices[1];
-    // logs::write("log.txt",1,"exp_share = %.2f, c_share = %.2f\n",exp_share,c_share);
     double expend_adj = (1-exp_share)*mbar;
     c = c_share*expend_adj;
     d = (1-c_share)*expend_adj;
 
-    // iii. compute post-decision states
+    // iv. compute post-decision states
     a = exp_share*mbar;
-    // logs::write("log.txt",1,"c = %.7f, d = %.7f, a = %.7f\n",c,d,a);
 
-
-
-    /// iv. compute utility
+    /// v. compute utility
     double u = utility::func(c,d,par);
-    // logs::write("log.txt",1,"u = %.7f\n",u);
 
-    // iv. compute objective
+    // vi. compute objective
     double value_of_choice;
+    
     if(t == par->T-1){
+        
         value_of_choice = u;
+
     } else {
-        long long i_w = index::d4(t,0,0,0,par->T-1,egm->Np,egm->Nn,egm->Na);
+
+        long long i_w = index::d4(t,0,0,0,par->T-1,vfi->Np,vfi->Nn,vfi->Na);
+
         double w = linear_interp::interp_3d(
-            egm->p_grid,egm->n_grid,egm->a_grid, // grids
-            egm->Np,egm->Nn,egm->Na, // dimensions
-            &egm->sol_w[i_w], // values
+            vfi->p_grid,vfi->n_grid,vfi->a_grid, // grids
+            vfi->Np,vfi->Nn,vfi->Na, // dimensions
+            &vfi->sol_w[i_w], // values
             p,d,a); // points
+
         value_of_choice  = u + par->beta * w;
+
     }
 
     return -value_of_choice;
@@ -68,7 +60,6 @@ double obj_adj(double *choices, void *solver_data_in){
 
 double obj_nlopt_adj(unsigned nx, const double *choices, double *grad, void *solver_data_in){
     
-
     solver_struct *solver_data = (solver_struct *) solver_data_in;
     auto par = solver_data->par;
 
@@ -105,14 +96,11 @@ double obj_nlopt_adj(unsigned nx, const double *choices, double *grad, void *sol
 
         }
 
-
     return obj_val;
 
 } // obj_nlopt
 
-
-
-void solve_adj(par_struct* par, egm_struct* egm, long long t){
+void solve_adj(par_struct* par, vfi_struct* vfi, long long t){
     
     #pragma omp parallel num_threads(par->cppthreads)
     {
@@ -121,11 +109,11 @@ void solve_adj(par_struct* par, egm_struct* egm, long long t){
         solver_struct *solver_data = new solver_struct;
 
         nlopt_opt opt;
-        if(egm->solver == 0){
+        if(vfi->solver == 0){
             opt = nlopt_create(NLOPT_LN_NELDERMEAD,2);
-        } else if(egm->solver == 1){
+        } else if(vfi->solver == 1){
             opt = nlopt_create(NLOPT_LD_SLSQP,2);
-        } else if(egm->solver == 2){
+        } else if(vfi->solver == 2){
             opt = nlopt_create(NLOPT_LD_MMA,2);
         }
 
@@ -134,19 +122,18 @@ void solve_adj(par_struct* par, egm_struct* egm, long long t){
         nlopt_set_maxeval(opt,200); // maximum number of function evaluations
 
         // b. loop over states
-        // #pragma omp for collapse(3)
         #pragma omp for
-        for(long long i_p = 0; i_p < egm->Np; i_p++){
-        for(long long i_n = 0; i_n < egm->Nn; i_n++){
-        for(long long i_m = 0; i_m < egm->Nm; i_m++){
+        for(long long i_p = 0; i_p < vfi->Np; i_p++){
+        for(long long i_n = 0; i_n < vfi->Nn; i_n++){
+        for(long long i_m = 0; i_m < vfi->Nm; i_m++){
 
             // i. create solver data
             solver_data->par = par;
-            solver_data->egm = egm;
+            solver_data->vfi = vfi;
             solver_data->t = t;
-            solver_data->p = egm->p_grid[i_p];
-            solver_data->n = egm->n_grid[i_n];
-            solver_data->m = egm->m_grid[i_m];
+            solver_data->p = vfi->p_grid[i_p];
+            solver_data->n = vfi->n_grid[i_n];
+            solver_data->m = vfi->m_grid[i_m];
             
             double n = solver_data->n;
             double m = solver_data->m;
@@ -163,17 +150,18 @@ void solve_adj(par_struct* par, egm_struct* egm, long long t){
             double start_vals[5] = {0.1,0.2,0.3,0.4,0.5};
             double choices[2];
             double best_choice[2];
+
             int evals_best;
             int flag_best;
+
             double best_value = 1e100;
+
             for (int i = 0; i < 5; i++){
 
                 // o. set start values
                 choices[0] = start_vals[i];
                 choices[1] = start_vals[i];
                     
-
-
                 solver_data->func_evals = 0;
                 double minf;
                 int flag = nlopt_optimize(opt,choices,&minf);
@@ -195,20 +183,18 @@ void solve_adj(par_struct* par, egm_struct* egm, long long t){
         // }
 
             // v. store
-            long long i_sol = index::d4(t,i_p,i_n,i_m,par->T,egm->Np,egm->Nn,egm->Nm);
+            long long i_sol = index::d4(t,i_p,i_n,i_m,par->T,vfi->Np,vfi->Nn,vfi->Nm);
 
             // value and marginal value
-            egm->sol_v_adj[i_sol] = -best_value;
+            vfi->sol_v_adj[i_sol] = -best_value;
 
             // choice
-            egm->sol_exp_share_adj[i_sol] = best_choice[0];
-            egm->sol_c_share_adj[i_sol] = best_choice[1];  
+            vfi->sol_exp_share_adj[i_sol] = best_choice[0];
+            vfi->sol_c_share_adj[i_sol] = best_choice[1];  
 
             // flags
-            egm->sol_flag_adj[i_sol] = flag_best;
-            egm->sol_func_evals_adj[i_sol] = evals_best;
-
-
+            vfi->sol_flag_adj[i_sol] = flag_best;
+            vfi->sol_func_evals_adj[i_sol] = evals_best;
 
         } // i_m
         } // i_n
@@ -221,4 +207,3 @@ void solve_adj(par_struct* par, egm_struct* egm, long long t){
     } // parallel
 
 } // solved
-

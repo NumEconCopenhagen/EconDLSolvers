@@ -757,12 +757,13 @@ class DLSolverClass():
                 if do_print_all: self._print_progress(t0_k,t0_solve)
             
             # v. termination from policy loss
-            if train.terminate_on_policy_loss and info[('policy_loss',k)] < train.tol_policy_loss:
-                self._update_best() # final update
-                k += 1
-                print(f'Terminating after {k} iter, policy loss lower than tolerance')
-                break
-            
+            if k > train.start_train_policy:
+                if train.terminate_on_policy_loss and info[('policy_loss',k)] < train.tol_policy_loss:
+                    self._update_best() # final update
+                    k += 1
+                    print(f'Terminating after {k} iter, policy loss lower than tolerance')
+                    break
+                
             # vi. termination from time
             time_tot = (time.perf_counter()-t0_solve)/60 + info['time']/60
             if time_tot > train.K_time:

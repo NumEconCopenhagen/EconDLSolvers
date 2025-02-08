@@ -163,7 +163,7 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
             beta_t[t] = beta**t
 
         c = sim.outcomes[:,:,0]
-        sim.R = np.sum(beta_t*np.log(c))/sim.N
+        sim.R = np.sum(beta_t*sim.reward)/sim.N
 
     def simulate_Rs(self):
         """ simulate life time reward for different transfer levels """

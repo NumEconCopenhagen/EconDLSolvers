@@ -38,13 +38,13 @@
 
 // b. structs
 #include "par_struct.cpp"
-#include "egm_struct.cpp"
+#include "vfi_struct.cpp"
 #include "sim_struct.cpp"
 
 typedef struct {
     
     par_struct *par;
-    egm_struct *egm;
+    vfi_struct *vfi;
     long long t, i_p, func_evals, Nchoices;
     double m,n,p, c, d, exp_share, c_share, sav_share;
 

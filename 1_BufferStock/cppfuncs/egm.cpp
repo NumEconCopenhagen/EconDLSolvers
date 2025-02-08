@@ -64,11 +64,11 @@ double compute_q(par_struct* par, egm_struct* egm, long long t, double sigma_xi,
 
             // i. node adjustment
             double xi_base = par->xi[i_xi];
-            double xi_ = xi_base*sqrt(2.0)*sigma_xi;
+            double xi_ = xi_base*sigma_xi;
             double xi = exp(xi_ - 0.5*pow(sigma_xi,2.0));
 
             double psi_base = par->psi[i_psi];
-            double psi_ = psi_base*sqrt(2.0)*sigma_psi;
+            double psi_ = psi_base*sigma_psi;
             double psi = exp(psi_ - 0.5*pow(sigma_psi,2.0));
 
             // ii. next-period states
@@ -196,7 +196,7 @@ EXPORT void solve_all(par_struct* par, egm_struct* egm){
                     par->T,egm->Np,egm->Nsigma_xi,egm->Nsigma_psi,egm->Nrho_p,egm->Nm
                 );
                 
-                egm->sol_con[i_sol] = egm->m_grid[i_m];
+                egm->sol_con[i_sol] = egm->m_grid[i_m]/(1.0+par->bequest);
 
             } // m-loop
             } // rho_p loop

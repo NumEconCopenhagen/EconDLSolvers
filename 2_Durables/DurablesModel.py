@@ -87,7 +87,7 @@ class DurablesModelClass(DLSolverClass):
         # saving and durables
         par.R = 1.01 # gross return
         par.D = 1 # number of durables
-        par.tau = 0.1 # adjustment cost
+        par.nu = 0.1 # adjustment cost
         par.nonnegative_investment = True # nonnegative investment
 
         # b. misc
@@ -270,7 +270,6 @@ class DurablesModelClass(DLSolverClass):
                     train.NFOC_targets = 1+par.D # number of targets in FOCs
                     assert self.par.KKT == True, 'KKT must be True for FOC in Durables model'
             
-    
     def allocate_train(self):
         """ allocate memory training """
 
