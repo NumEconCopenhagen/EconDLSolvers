@@ -267,7 +267,6 @@ For **termination of iterations**:
 1. `K`: Maximum number of iterations before termination
 1. `K_time`: Maximum number of minutes termination
 1. `sim_R_freq`: Iterations between each simulation of lifetime reward (`sim.R`)
-1. `only_time_termination`: Only termination from time (or maximum number of iterations) 'True/False'
 
 1. ´convergence_plot`: Print convergence plot in convergence.png
 1. ´transfer_grid`:Grid for calculation of transfer
@@ -366,5 +365,21 @@ The results for the model with multiple durable goods and non-convex adjustment 
 
 1. Run `NonConvexDurables\01_Run_DP.ipynb`
 1. Run `NonConvexDurables\02_Run_DL.ipynb`
+1. Run `NonConvexDurables\03_Results.ipynb`
 
 All output is saved in `output/`.
+
+## Contributers
+
+Main developers:
+
+* Jeppe Druedahl
+* Jacob Røpke
+* Raphaël Huleux
+
+Additional developers:
+
+* Martin Andreas Kildemark
+* Mikkel Østergaard Reicher
+
+**Want to contribute?** Please contact [jeppe.druedahl@econ.ku.dk](mailto:jeppe.druedahl@econ.ku.dk )

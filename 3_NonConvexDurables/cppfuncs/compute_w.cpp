@@ -3,9 +3,6 @@
 #include "header.cpp"
 #endif
 
-
-
-
 double logsumexp(double v_keep, double v_adj, par_struct* par){ // utility function
 
     double vmax = fmax(v_keep,v_adj);
@@ -15,28 +12,25 @@ double logsumexp(double v_keep, double v_adj, par_struct* par){ // utility funct
 
 }
 
+void compute_w(par_struct *par, vfi_struct *vfi, long long t){
 
-void compute_w(par_struct *par, egm_struct *egm, long long t){
-
-    // compute post-decision value (w) and post-decision marginal value of cash (q)
+    // compute post-decision value (w)
 
     #pragma omp parallel num_threads(par->cppthreads)
     {
 
     // loop over states
-    // #pragma omp for collapse(1)
     #pragma omp for
-    for(long long i_p = 0; i_p < egm->Np; i_p++){
-    for(long long i_n = 0; i_n < egm->Nn; i_n++){
-    for(long long i_a = 0; i_a < egm->Na; i_a++){
+    for(long long i_p = 0; i_p < vfi->Np; i_p++){
+    for(long long i_n = 0; i_n < vfi->Nn; i_n++){
+    for(long long i_a = 0; i_a < vfi->Na; i_a++){
 
         double d[MAX_D], n_plus[MAX_D];
 
         // a. unpack
-        double p = egm->p_grid[i_p];
-        double n = egm->n_grid[i_n];
-        double a = egm->a_grid[i_a];
-
+        double p = vfi->p_grid[i_p];
+        double n = vfi->n_grid[i_n];
+        double a = vfi->a_grid[i_a];
 
         // b. initialize expectations
         double w_val = 0.0;
@@ -53,36 +47,34 @@ void compute_w(par_struct *par, egm_struct *egm, long long t){
 
             // next period permanent income
             double p_plus = pow(p,par->eta)*xi;
-            if (p_plus > egm->p_max){p_plus = egm->p_max;} // enforce upper bound
-            if (p_plus < egm->p_min){p_plus = egm->p_min;} // enforce lower bound
+            if (p_plus > vfi->p_max){p_plus = vfi->p_max;} // enforce upper bound
+            if (p_plus < vfi->p_min){p_plus = vfi->p_min;} // enforce lower bound
 
             // next period durable
             double n_plus = (1-par->delta)*n;
-            if (n_plus > egm->n_max){n_plus = egm->n_max;} // enforce upper bound
-            if (n_plus < egm->n_min){n_plus = egm->n_min;} // enforce lower bound
+            if (n_plus > vfi->n_max){n_plus = vfi->n_max;} // enforce upper bound
+            if (n_plus < vfi->n_min){n_plus = vfi->n_min;} // enforce lower bound
 
             // next period cash on hand
             double m_plus = par->R*a + psi*p_plus;
-            if (m_plus > egm->m_max){m_plus = egm->m_max;} // enforce upper bound
-            if (m_plus < egm->m_min){m_plus = egm->m_min;} // enforce lower bound
+            if (m_plus > vfi->m_max){m_plus = vfi->m_max;} // enforce upper bound
+            if (m_plus < vfi->m_min){m_plus = vfi->m_min;} // enforce lower bound
 
             // iii. interpolate future value
-            long long i_plus_interp = index::d4(t+1,0,0,0,par->T,egm->Np,egm->Nn,egm->Nm);
+            long long i_plus_interp = index::d4(t+1,0,0,0,par->T,vfi->Np,vfi->Nn,vfi->Nm);
 
             // keeper value
             double v_plus_keep = linear_interp::interp_3d(
-                egm->p_grid,egm->n_grid,egm->m_grid, // grids
-                egm->Np,egm->Nn,egm->Nm, // dimensions
-                &egm->sol_v_keep[i_plus_interp], // values
-                p_plus,n_plus,m_plus); // points
-                
-
+                vfi->p_grid,vfi->n_grid,vfi->m_grid, // grids
+                vfi->Np,vfi->Nn,vfi->Nm, // dimensions
+                &vfi->sol_v_keep[i_plus_interp], // values
+                p_plus,n_plus,m_plus); // points        
 
             // adjuster value
             double v_plus_adj = linear_interp::interp_3d(
-                egm->p_grid,egm->n_grid,egm->m_grid, // grids
-                egm->Np,egm->Nn,egm->Nm, // dimensions
-                &egm->sol_v_adj[i_plus_interp], // values
+                vfi->p_grid,vfi->n_grid,vfi->m_grid, // grids
+                vfi->Np,vfi->Nn,vfi->Nm, // dimensions
+                &vfi->sol_v_adj[i_plus_interp], // values
                 p_plus,n_plus,m_plus); // points
 
             // iv. logsumexp
@@ -95,8 +87,8 @@ void compute_w(par_struct *par, egm_struct *egm, long long t){
         } // i_xi
 
         // d. store
-        long long i_wq = index::d4(t,i_p,i_n,i_a,par->T-1,egm->Np,egm->Nn,egm->Na);
-        egm->sol_w[i_wq] = w_val;
+        long long i_wq = index::d4(t,i_p,i_n,i_a,par->T-1,vfi->Np,vfi->Nn,vfi->Na);
+        vfi->sol_w[i_wq] = w_val;
 
     } // i_a
     }  // i_n
@@ -105,4 +97,3 @@ void compute_w(par_struct *par, egm_struct *egm, long long t){
     } // parallel
     
 }
-

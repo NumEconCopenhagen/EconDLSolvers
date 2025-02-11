@@ -5,6 +5,7 @@ typedef struct par_struct
  int T;
  int T_retired;
  double beta;
+ double bequest;
  double kappa_base;
  double kappa_growth;
  double kappa_growth_decay;
@@ -89,6 +90,7 @@ int get_int_par_struct(par_struct* x, char* name){
 double get_double_par_struct(par_struct* x, char* name){
 
  if( strcmp(name,"beta") == 0 ){ return x->beta; }
+ else if( strcmp(name,"bequest") == 0 ){ return x->bequest; }
  else if( strcmp(name,"kappa_base") == 0 ){ return x->kappa_base; }
  else if( strcmp(name,"kappa_growth") == 0 ){ return x->kappa_growth; }
  else if( strcmp(name,"kappa_growth_decay") == 0 ){ return x->kappa_growth_decay; }

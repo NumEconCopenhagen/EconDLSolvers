@@ -33,6 +33,8 @@ class BufferStockModelClass(DLSolverClass):
 
         # preferences
         par.beta = 1/1.01 # discount factor
+        par.bequest = 0.0 # bequest motive
+
 
         # income
         par.kappa_base = 1.0 # base  # Martin - Life cycle is kappa in paper

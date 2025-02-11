@@ -3,9 +3,6 @@
 #include "header.cpp"
 #endif
 
-
-
-
 double obj_keep(double *choices, void *solver_data_in){ 
     
     solver_struct *solver_data = (solver_struct *) solver_data_in;
@@ -13,7 +10,7 @@ double obj_keep(double *choices, void *solver_data_in){
 
     // i. unpack
     auto par = solver_data->par;
-    auto egm = solver_data->egm;
+    auto vfi = solver_data->vfi;
     long long t = solver_data->t;
     double n = solver_data->n;
     double m = solver_data->m;
@@ -31,15 +28,21 @@ double obj_keep(double *choices, void *solver_data_in){
     // iv. compute objective
     double value_of_choice;
     if(t == par->T-1){
+        
         value_of_choice = u;
+
     } else {
-        long long i_w = index::d4(t,0,0,0,par->T-1,egm->Np,egm->Nn,egm->Na);
+        
+        long long i_w = index::d4(t,0,0,0,par->T-1,vfi->Np,vfi->Nn,vfi->Na);
+        
         double w = linear_interp::interp_3d(
-            egm->p_grid,egm->n_grid,egm->a_grid, // grids
-            egm->Np,egm->Nn,egm->Na, // dimensions
-            &egm->sol_w[i_w], // values
+            vfi->p_grid,vfi->n_grid,vfi->a_grid, // grids
+            vfi->Np,vfi->Nn,vfi->Na, // dimensions
+            &vfi->sol_w[i_w], // values
             p,n,a); // points
+        
         value_of_choice  = u + par->beta * w;
+        
     }
 
     return -value_of_choice;
@@ -48,7 +51,6 @@ double obj_keep(double *choices, void *solver_data_in){
 
 double obj_nlopt_keep(unsigned nx, const double *choices, double *grad, void *solver_data_in){
     
-
     solver_struct *solver_data = (solver_struct *) solver_data_in;
     auto par = solver_data->par;
 
@@ -68,15 +70,11 @@ double obj_nlopt_keep(unsigned nx, const double *choices, double *grad, void *so
 
         }
 
-
     return obj_val;
 
 } // obj_nlopt
 
-
-
-
-void solve_keep(par_struct* par, egm_struct* egm, long long t){
+void solve_keep(par_struct* par, vfi_struct* vfi, long long t){
     
     #pragma omp parallel num_threads(par->cppthreads)
     {
@@ -85,11 +83,11 @@ void solve_keep(par_struct* par, egm_struct* egm, long long t){
         solver_struct *solver_data = new solver_struct;
 
         nlopt_opt opt;
-        if(egm->solver == 0){
+        if(vfi->solver == 0){
             opt = nlopt_create(NLOPT_LN_NELDERMEAD,1);
-        } else if(egm->solver == 1){
+        } else if(vfi->solver == 1){
             opt = nlopt_create(NLOPT_LD_SLSQP,1);
-        } else if(egm->solver == 2){
+        } else if(vfi->solver == 2){
             opt = nlopt_create(NLOPT_LD_MMA,1);
         }
 
@@ -98,19 +96,18 @@ void solve_keep(par_struct* par, egm_struct* egm, long long t){
         nlopt_set_maxeval(opt,200); // maximum number of function evaluations
 
         // b. loop over states
-        // #pragma omp for collapse(3)
         #pragma omp for
-        for(long long i_p = 0; i_p < egm->Np; i_p++){
-        for(long long i_n = 0; i_n < egm->Nn; i_n++){
-        for(long long i_m = 0; i_m < egm->Nm; i_m++){
+        for(long long i_p = 0; i_p < vfi->Np; i_p++){
+        for(long long i_n = 0; i_n < vfi->Nn; i_n++){
+        for(long long i_m = 0; i_m < vfi->Nm; i_m++){
 
             // i. create solver data
             solver_data->par = par;
-            solver_data->egm = egm;
+            solver_data->vfi = vfi;
             solver_data->t = t;
-            solver_data->p = egm->p_grid[i_p];
-            solver_data->n = egm->n_grid[i_n];
-            solver_data->m = egm->m_grid[i_m];
+            solver_data->p = vfi->p_grid[i_p];
+            solver_data->n = vfi->n_grid[i_n];
+            solver_data->m = vfi->m_grid[i_m];
             
             double n = solver_data->n;
             double m = solver_data->m;
@@ -122,20 +119,21 @@ void solve_keep(par_struct* par, egm_struct* egm, long long t){
 
             nlopt_set_lower_bounds(opt,choices_low);
             nlopt_set_upper_bounds(opt,choices_high);
-        
-            
+                    
             // iii. multistart solving
             double start_vals[5] = {0.1,0.2,0.3,0.4,0.5};
             double choices[1];
             double best_choice[1];
+
             int evals_best;
             int flag_best;
+            
             double best_value = 1e100;
+
             for(int i_start = 0; i_start < 5; i_start++){
             
                 // o. set starting values
                 choices[0] = start_vals[i_start];
-
 
                 solver_data->func_evals = 0;
                 double minf;
@@ -143,9 +141,8 @@ void solve_keep(par_struct* par, egm_struct* egm, long long t){
                 if (t == par->T-1){
                     choices[0] = 0.0;
                     flag = -10;
-                }
-                else{
-                flag = nlopt_optimize(opt,choices,&minf);
+                } else{
+                    flag = nlopt_optimize(opt,choices,&minf);
                 }
 
                 // iv. objective
@@ -159,23 +156,20 @@ void solve_keep(par_struct* par, egm_struct* egm, long long t){
                     flag_best = flag;
                 }
 
-                
-
             }
 
-
             // v. store
-            long long i_sol = index::d4(t,i_p,i_n,i_m,par->T,egm->Np,egm->Nn,egm->Nm);
+            long long i_sol = index::d4(t,i_p,i_n,i_m,par->T,vfi->Np,vfi->Nn,vfi->Nm);
 
             // value and marginal value
-            egm->sol_v_keep[i_sol] = -best_value;
+            vfi->sol_v_keep[i_sol] = -best_value;
 
             // choice
-            egm->sol_sav_share_keep[i_sol] = best_choice[0];
+            vfi->sol_sav_share_keep[i_sol] = best_choice[0];
 
             // flags
-            egm->sol_flag_keep[i_sol] = flag_best;
-            egm->sol_func_evals_keep[i_sol] = evals_best;
+            vfi->sol_flag_keep[i_sol] = flag_best;
+            vfi->sol_func_evals_keep[i_sol] = evals_best;
 
         } // i_m
         } // i_n

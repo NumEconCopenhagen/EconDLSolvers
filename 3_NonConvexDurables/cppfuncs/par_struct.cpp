@@ -29,11 +29,11 @@ typedef struct par_struct
  double mu_n0;
  double sigma_n0;
  int cppthreads;
+ double gumbell_param;
  double* xi;
  double* xi_w;
  double* psi;
  double* psi_w;
- double gumbell_param;
 } par_struct;
 
 bool get_bool_par_struct(par_struct* x, char* name){

@@ -134,9 +134,11 @@ def simulate_DeepSimulate(model,policy_NN,initial_states,shocks):
 		discount_factor[t] = model.discount_factor(states_t,t=t)**t
 
 		# iv. transition
+		states_pd_t = model.state_trans_pd(states_t,actions_t,outcomes_t,t=t)
 		if t < par.T-1:
-			states_pd_t = model.state_trans_pd(states_t,actions_t,outcomes_t,t=t)			
 			new_states_t[:,:] = model.state_trans(states_pd_t,shocks[t+1],t=t)
+		else:
+			reward[t] += model.terminal_reward_pd(states_pd_t)[...,0]
 			
 	# d. compute discounted utility
 	R = torch.sum(discount_factor*reward)/train.N

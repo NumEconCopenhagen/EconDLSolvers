@@ -10,12 +10,12 @@ from EconDLSolvers import expand_to_quad, expand_to_states
 def adj_cost(par,Delta):
 	""" Adjustment cost """
 
-	return par.tau * (Delta)**2
+	return par.nu * (Delta)**2
 
 def d_adj_cost(par,Delta):
 	""" Derivative of adjustment cost """
 
-	return 2*par.tau*Delta
+	return 2*par.nu*Delta
 
 def d_consume_all(tau,m,epsilon):
 	""" Computation maximum investment level if the consumer spend all cash-on-hand except for epsilon """
@@ -71,7 +71,7 @@ def compute_d_and_c_from_action(par,state,action,eps=None):
 		if par.nonnegative_investment:
 			d_low = state[...,2+i_d]
 
-		d_high = state[...,2+i_d] + d_consume_all(par.tau,mbar,0.0) # current level + maximum investment level
+		d_high = state[...,2+i_d] + d_consume_all(par.nu,mbar,0.0) # current level + maximum investment level
 
 		# ii. add noise to action if needed
 		if eps is None:

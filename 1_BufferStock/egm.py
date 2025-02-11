@@ -26,6 +26,16 @@ def utility(par, c):
 
 	return np.log(c)
 
+@nb.njit
+def utility_terminal(par, c, b):
+	""" utility function in terminal period """
+	if par.bequest == 0.0:
+		u = np.log(c)
+	else:
+		u = np.log(c) + par.bequest*np.log(b)
+	return u
+
+
 
 @nb.njit(parallel=False)
 def EGM(t,par,egm):
@@ -46,7 +56,7 @@ def EGM(t,par,egm):
 			for i_sigma_xi in nb.prange(egm.Nsigma_xi):
 				for i_sigma_psi in nb.prange(egm.Nsigma_psi):
 					for i_rho_p in nb.prange(egm.Nrho_p):
-						sol_con[t,i_p,i_sigma_xi,i_sigma_psi,i_rho_p,:] = m_grid
+						sol_con[t,i_p,i_sigma_xi,i_sigma_psi,i_rho_p,:] = (m_grid)/(1+par.bequest)
 
 	# b. other periods
 	else:
@@ -107,10 +117,10 @@ def compute_q(par,egm,t,sigma_xi,sigma_psi,m_pd,p,rho_p):
 			
 			# o. adjust nodes
 			xi = par.xi[i_xi]
-			xi = xi*np.sqrt(2)*sigma_xi
+			xi = xi*sigma_xi
 			xi = np.exp(xi-0.5*sigma_xi**2)
 			psi = par.psi[i_psi]
-			psi = psi*np.sqrt(2)*sigma_psi
+			psi = psi*sigma_psi
 			psi = np.exp(psi-0.5*sigma_psi**2)
 
 			# oo. next-period states
@@ -269,9 +279,8 @@ def simulate(par,egm,sim,final=False):
 		# a. final period consumption
 		if t == par.T-1:
 
-			c[t] = m[t]
-			if final: MPC[t] = 1.0
-
+			c[t] = (m[t])/(1+par.bequest)
+			if final: MPC[t] = 1.0/(1+par.bequest)
 		# b. consumption all other periods
 		else:
 				
@@ -291,7 +300,10 @@ def simulate(par,egm,sim,final=False):
 					MPC[t] = (c_MPC-c[t])/par.Delta_MPC
 
 		# c. reward
-		reward[t] = np.log(c[t])
+		if t == par.T-1:
+			reward[t] = utility_terminal(par,c[t],m[t]-c[t])
+		else:
+			reward[t] = utility(par,c[t])
 
 		# d. post-decision states
 		m_pd[t] = m[t]-c[t]

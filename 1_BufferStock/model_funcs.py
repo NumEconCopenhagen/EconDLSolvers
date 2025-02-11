@@ -159,9 +159,9 @@ def terminal_actions(model,states):
 	device = train.device
 
 	if par.policy_predict == 'savings_rate':
-		actions = torch.zeros((*states.shape[:-1],1),dtype=dtype,device=device)
+		actions = (1-((states[...,0])/(1+par.bequest))/states[...,0]).reshape((*states.shape[:-1],1))
 	elif par.policy_predict == 'consumption':
-		actions = states[...,0].reshape((*states.shape[:-1],1))
+		actions = actions = ((states[...,0])/(1+par.bequest)).reshape((*states.shape[:-1],1))
 	else:
 		raise ValueError('policy_predict must be either savings_rate or consumption')
 
@@ -180,11 +180,16 @@ def terminal_reward_pd(model,states_pd):
 	# Case II: states_pd.shape = (N,Nstates_pd)
 
 	train = model.train
+	par = model.par
 	dtype = train.dtype
 	device = train.device
 
-	value_pd = torch.zeros((*states_pd.shape[:-1],1),dtype=dtype,device=device)
-
+	m_pd = states_pd[...,0]
+	if par.bequest == 0:
+		u = torch.zeros_like(m_pd)
+	else:
+		u = par.bequest*torch.log(m_pd)
+	value_pd = u.unsqueeze(-1)
 	return value_pd 
 	# Case I: shapes = (1,...,1)
 	# Case II: shapes = (N,1)

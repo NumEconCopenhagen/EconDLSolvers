@@ -129,7 +129,7 @@ class DurablesModelEGMClass(EconModelClass,DurablesModelClass):
         egm.transfer_grid = np.concatenate((-np.flip(neg),np.zeros(1),pos))/10_000
         egm.Ntransfer = egm.transfer_grid.size
 
-        # f. get number of cores
+        # f. get number of threads
         par.cppthreads = os.cpu_count()
 
         # g. simulation
