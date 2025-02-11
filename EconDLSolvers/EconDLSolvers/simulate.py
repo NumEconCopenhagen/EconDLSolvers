@@ -145,5 +145,6 @@ def simulate_DeepSimulate(model,policy_NN,initial_states,shocks):
 	loss = -R
 
 	if torch.cuda.is_available() and train.device != 'cpu':
-		 torch.cuda.synchronize(device=device)	
+		torch.cuda.synchronize(device=device)	
+	
 	return loss
