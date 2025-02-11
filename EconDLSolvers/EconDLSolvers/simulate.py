@@ -142,5 +142,6 @@ def simulate_DeepSimulate(model,policy_NN,initial_states,shocks):
 	R = torch.sum(discount_factor*reward)/train.N
 	loss = -R
 
-	if torch.cuda.is_available(): torch.cuda.synchronize(device=device)	
+	if torch.cuda.is_available() and train.device != 'cpu':
+		 torch.cuda.synchronize(device=device)	
 	return loss
