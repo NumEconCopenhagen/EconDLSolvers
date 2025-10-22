@@ -158,10 +158,11 @@ def terminal_actions(model,states):
 	dtype = train.dtype
 	device = train.device
 
+	m = states[...,0]
 	if par.policy_predict == 'savings_rate':
-		actions = (1-((states[...,0])/(1+par.bequest))/states[...,0]).reshape((*states.shape[:-1],1))
+		actions = (1-(m/(1+par.beta*par.bequest))/m).reshape((*states.shape[:-1],1))
 	elif par.policy_predict == 'consumption':
-		actions = actions = ((states[...,0])/(1+par.bequest)).reshape((*states.shape[:-1],1))
+		actions = actions = (m/(1+par.bequest*par.bequest)).reshape((*states.shape[:-1],1))
 	else:
 		raise ValueError('policy_predict must be either savings_rate or consumption')
 
@@ -374,7 +375,7 @@ def eval_burmeister(model,states,states_plus,actions,actions_plus):
 
 	# a. compute consumption at time t
 	c_t = predict_consumption(par,states,actions)
-
+	
 	# b. compute consumption at time t+1
 	c_tplus = predict_consumption(par,states_plus,actions_plus)
 

@@ -89,7 +89,7 @@ def simulate(model,ns,eps=None,exo_actions=None):
 			# vi. termina value
 			if t == par.T-1:
 				if par.NDC == 0:
-					reward[t] += model.terminal_reward_pd(states_pd[t])[...,0]
+					reward[t] += model.discount_factor(states[t],t=t)*model.terminal_reward_pd(states_pd[t])[...,0]
 
 	if par.NDC == 0:
 		ns.R = torch.sum(discount_factor*reward)/ns.N

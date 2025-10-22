@@ -9,33 +9,30 @@ from consav.linear_interp import interp_2d,interp_3d, interp_4d, interp_5d, inte
 #########
 
 @nb.njit
-def inverse_marg_util(par, u):
+def inverse_marg_util(par,u):
 	""" Inverse function of marginal utility of consumption """
 
 	return 1/u
 
 @nb.njit
-def marg_util_con(par, c):
+def marg_util_con(par,c):
 	""" marginal utility of consumption """
 
 	return 1/c
 
 @nb.njit
-def utility(par, c):
+def utility(par,c):
 	""" utility function """
 
 	return np.log(c)
 
 @nb.njit
-def utility_terminal(par, c, b):
+def utility_bequest(par,m_pd):
 	""" utility function in terminal period """
-	if par.bequest == 0.0:
-		u = np.log(c)
+	if not par.bequest:
+		return np.zeros_like(m_pd)
 	else:
-		u = np.log(c) + par.bequest*np.log(b)
-	return u
-
-
+		return par.bequest*np.log(m_pd)
 
 @nb.njit(parallel=False)
 def EGM(t,par,egm):
@@ -56,7 +53,7 @@ def EGM(t,par,egm):
 			for i_sigma_xi in nb.prange(egm.Nsigma_xi):
 				for i_sigma_psi in nb.prange(egm.Nsigma_psi):
 					for i_rho_p in nb.prange(egm.Nrho_p):
-						sol_con[t,i_p,i_sigma_xi,i_sigma_psi,i_rho_p,:] = (m_grid)/(1+par.bequest)
+						sol_con[t,i_p,i_sigma_xi,i_sigma_psi,i_rho_p,:] = (m_grid)/(1+par.beta*par.bequest)
 
 	# b. other periods
 	else:
@@ -117,10 +114,10 @@ def compute_q(par,egm,t,sigma_xi,sigma_psi,m_pd,p,rho_p):
 			
 			# o. adjust nodes
 			xi = par.xi[i_xi]
-			xi = xi*sigma_xi
+			xi = xi*np.sqrt(2)*sigma_xi
 			xi = np.exp(xi-0.5*sigma_xi**2)
 			psi = par.psi[i_psi]
-			psi = psi*sigma_psi
+			psi = psi*np.sqrt(2)*sigma_psi
 			psi = np.exp(psi-0.5*sigma_psi**2)
 
 			# oo. next-period states
@@ -232,6 +229,7 @@ def simulate(par,egm,sim,final=False):
 	# a. unpack
 	states = sim.states # shape (T,N,Nstates)
 	states_pd = sim.states_pd # shape (T,N,Nstates_pd)
+	actions = sim.actions # shape (T,N,Nactions)
 	outcomes = sim.outcomes # shape (T,N,Noutcomes)
 	shocks = sim.shocks # shape (T,N,Nshocks)
 	reward = sim.reward # shape (T,N,Nstates)
@@ -242,6 +240,8 @@ def simulate(par,egm,sim,final=False):
 
 	m_pd = states_pd[:,:,0]
 	p_pd = states_pd[:,:,1]
+
+	savings_rate = actions[:,:,0]
 	
 	xi = shocks[:,:,0]
 	psi = shocks[:,:,1]
@@ -279,8 +279,9 @@ def simulate(par,egm,sim,final=False):
 		# a. final period consumption
 		if t == par.T-1:
 
-			c[t] = (m[t])/(1+par.bequest)
-			if final: MPC[t] = 1.0/(1+par.bequest)
+			c[t] = m[t]/(1+par.beta*par.bequest)
+			if final: MPC[t] = 1.0/(1+par.beta*par.bequest)
+			
 		# b. consumption all other periods
 		else:
 				
@@ -300,14 +301,15 @@ def simulate(par,egm,sim,final=False):
 					MPC[t] = (c_MPC-c[t])/par.Delta_MPC
 
 		# c. reward
-		if t == par.T-1:
-			reward[t] = utility_terminal(par,c[t],m[t]-c[t])
-		else:
-			reward[t] = utility(par,c[t])
+		reward[t] = utility(par,c[t])
+		if t == par.T-1: reward[t] += par.beta*utility_bequest(par,m[t]-c[t])
 
 		# d. post-decision states
 		m_pd[t] = m[t]-c[t]
 		p_pd[t] = p[t]
+
+		# savings rate
+		savings_rate[t] = m_pd[t]/m[t]
 
 		# e. next period
 		if t < par.T-1:

@@ -64,11 +64,11 @@ double compute_q(par_struct* par, egm_struct* egm, long long t, double sigma_xi,
 
             // i. node adjustment
             double xi_base = par->xi[i_xi];
-            double xi_ = xi_base*sigma_xi;
+            double xi_ = xi_base*sqrt(2.0)*sigma_xi;
             double xi = exp(xi_ - 0.5*pow(sigma_xi,2.0));
 
             double psi_base = par->psi[i_psi];
-            double psi_ = psi_base*sigma_psi;
+            double psi_ = psi_base*sqrt(2.0)*sigma_psi;
             double psi = exp(psi_ - 0.5*pow(sigma_psi,2.0));
 
             // ii. next-period states
