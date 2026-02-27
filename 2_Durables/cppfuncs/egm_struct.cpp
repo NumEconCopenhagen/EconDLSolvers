@@ -26,8 +26,8 @@ typedef struct egm_struct
  double* sol_d2_fac;
  double* sol_d3_fac;
  double* sol_m_pd_fac;
- int* sol_func_evals;
- int* sol_flag;
+ double* sol_func_evals;
+ double* sol_flag;
  double* sol_c_keep;
  double* sol_w;
  double* sol_q;
@@ -85,19 +85,12 @@ double* get_double_p_egm_struct(egm_struct* x, char* name){
  else if( strcmp(name,"sol_d2_fac") == 0 ){ return x->sol_d2_fac; }
  else if( strcmp(name,"sol_d3_fac") == 0 ){ return x->sol_d3_fac; }
  else if( strcmp(name,"sol_m_pd_fac") == 0 ){ return x->sol_m_pd_fac; }
+ else if( strcmp(name,"sol_func_evals") == 0 ){ return x->sol_func_evals; }
+ else if( strcmp(name,"sol_flag") == 0 ){ return x->sol_flag; }
  else if( strcmp(name,"sol_c_keep") == 0 ){ return x->sol_c_keep; }
  else if( strcmp(name,"sol_w") == 0 ){ return x->sol_w; }
  else if( strcmp(name,"sol_q") == 0 ){ return x->sol_q; }
  else if( strcmp(name,"transfer_grid") == 0 ){ return x->transfer_grid; }
- else {return NULL;}
-
-}
-
-
-int* get_int_p_egm_struct(egm_struct* x, char* name){
-
- if( strcmp(name,"sol_func_evals") == 0 ){ return x->sol_func_evals; }
- else if( strcmp(name,"sol_flag") == 0 ){ return x->sol_flag; }
  else {return NULL;}
 
 }

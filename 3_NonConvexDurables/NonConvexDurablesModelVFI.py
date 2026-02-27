@@ -3,188 +3,307 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE' # without this python may crash when
 import pickle
 from types import SimpleNamespace
 import numpy as np
+import numba as nb 
 import torch
 from copy import deepcopy
-torch.set_warn_always(False)
+torch.set_warn_always(True)
 
-from EconModel import EconModelClass
+# EconModel and consav
+from EconModel import EconModelClass, jit
 from consav.grids import nonlinspace
-from simulate import simulate
+from consav.linear_interp import interp_2d, interp_3d, interp_4d
+from simulation import simulate_1d, simulate_2d
 
 # local
 from NonConvexDurablesModel import NonConvexDurablesModelClass
 
 class NonConvexDurablesModelVFIClass(EconModelClass,NonConvexDurablesModelClass):
 
-	#########
-	# setup #
-	#########
+    #########
+    # setup #
+    #########
 
-	def settings(self):
-		""" basic settings """
-		
-		self.namespaces = ['par','sim','vfi'] # must be numba-able
-		self.other_attrs = ['train','info']
+    def settings(self):
+        """ basic settings """
+        
+        self.namespaces = ['par','sim','vfi'] # must be numba-able
+        self.other_attrs = ['train','info']
+        self.savefolder = '../output/'
+        
+        # info
+        self.info = {}
 
-		# info
-		self.info = {}
+        # train
+        self.train = SimpleNamespace()
+        self.train.dtype = torch.float32
+        self.train.device = 'cpu'
 
-		# train
-		self.train = SimpleNamespace()
-		self.train.dtype = torch.float32
-		self.train.device = 'cpu'
+        # cpp
+        self.cpp_filename = 'cppfuncs/main.cpp'
+        self.cpp_options = {'compiler':'vs'}	
 
-		# cpp
-		self.cpp_filename = 'cppfuncs/main.cpp'
-		self.cpp_options = {'compiler':'vs'}	
+    def setup(self):
+        """ choose parameters """
 
-	def setup(self):
-		""" choose parameters """
+        vfi = self.vfi
+        par = self.par
+        sim = self.sim
 
-		vfi = self.vfi
-		
-		# a. from BufferStockModelClass
-		super().setup(full=True)
+        sim.R = 0.0
+        
+        # a. from BufferStockModelClass
+        super().setup(full=True)
 
-		# b. vfi	
-		vfi.Nm = 150 # number of grid points
-		vfi.Na = 150 # number of grid points
-		vfi.Np = 150 # number of grid points
-		vfi.Nn = 150 # number of grid points
+        # b. vfi	
+        if par.full:
+            vfi.Nm = 150 # number of grid points
+            vfi.Na = 200 # number of grid points
+            vfi.Np = 100 # number of grid points
+            vfi.Nn = 150 # number of grid points
+            vfi.Nx = 150 # number of grid points
+        else:
+            vfi.Nm = 10
+            vfi.Na = 20 
+            vfi.Np = 10 
+            vfi.Nn = 10 
+            vfi.Nx = 10
 
-		vfi.m_max = 5.0 # max cash-on-hand
-		vfi.m_min = 1e-8
-		vfi.a_max = vfi.m_max + 1.0
-		vfi.n_min = 0.0 # min durable
-		vfi.n_max = 5.0 # max durable
-		vfi.p_min = 1e-4 # min persistent income
-		vfi.p_max = 12.0 # max persistent income
+        vfi.m_min = 1e-8
+        vfi.m_max = 5.0 
+        vfi.a_max = vfi.m_max + 1.0
 
-		vfi.solver = 2 # 0: Nelder-Mead, 1: SLSQP, 2: MMA
+        vfi.n_min = 0.0 
+        vfi.n_max = 7.0 
+        
+        vfi.x_min = 1e-8
+        vfi.x_max = 5.0 + (1-par.nu) * vfi.n_max * par.D
+        
+        vfi.p_min = 1e-4
+        vfi.p_max = 5.0
 
-		# c. number of threads
-		self.par.cppthreads = min(vfi.Np,os.cpu_count())
+        vfi.solver = 2 # 0: Nelder-Mead, 1: SLSQP, 2: MMA
 
-	def allocate(self):
-		""" allocate arrays  """
+        # c. number of threads
+        self.par.cppthreads = min(vfi.Np,os.cpu_count())
 
-		# unpack
-		par = self.par
-		sim = self.sim
+    def allocate(self):
+        """ allocate arrays  """
 
-		# a. from BufferStockModelClass
-		super().allocate()
-		self.prepare_simulate_R()
+        # unpack
+        par = self.par
+        sim = self.sim
+        vfi = self.vfi
+        dtype = self.train.dtype
+        device = self.train.device
 
-		# convert par and sim to numpy
-		for k,v in par.__dict__.items():
-			if isinstance(v,torch.Tensor): par.__dict__[k] = v.to(torch.float64).cpu().numpy()
+        # a. from BufferStockModelClass
+        super().allocate()
+        self.prepare_simulate_R()
 
-		for k,v in sim.__dict__.items():
-			if isinstance(v,torch.Tensor): sim.__dict__[k] = v.to(torch.float64).cpu().numpy()
+        # convert par and sim to numpy
+        for k,v in par.__dict__.items():
+            if isinstance(v,torch.Tensor): par.__dict__[k] = v.to(torch.float64).cpu().numpy()
 
-		sim.reward = np.zeros((par.T,sim.N))
+        for k,v in sim.__dict__.items():
+            if isinstance(v,torch.Tensor): sim.__dict__[k] = v.to(torch.float64).cpu().numpy()
+        
+        del par.choices_from_iDC, par.iDC_from_choices, par.actions_from_iDC, par.actions_from_i_actions
 
-		# b. vfi
-		self.create_VFI_grids()
-	
-	def create_VFI_grids(self):
-		""" create grids for VFI and dependent variables"""
+        # b. vfi
+        self.create_VFI_grids()
+    
+    def create_VFI_grids(self):
+        """ create grids for VFI and dependent variables"""
 
-		par = self.par
-		vfi = self.vfi
+        par = self.par
+        vfi = self.vfi
+        sim = self.sim
 
-		# a. grids for dynamic states
-		m_min = x_min = vfi.p_min*par.psi.min()
-		vfi.m_grid = nonlinspace(m_min,vfi.m_max,vfi.Nm,1.1)
-		vfi.a_grid = nonlinspace(0.0,vfi.a_max,vfi.Na,1.1)
-		vfi.p_grid = np.linspace(vfi.p_min,vfi.p_max,vfi.Np)
-		vfi.n_grid = np.linspace(vfi.n_min,vfi.n_max,vfi.Nn)
+        # a. grids for dynamic states
+        m_min = x_min = vfi.p_min*par.psi.min()
+        vfi.m_grid = nonlinspace(m_min,vfi.m_max,vfi.Nm,1.1)
+        vfi.a_grid = nonlinspace(0.0,vfi.a_max,vfi.Na,1.1)
+        vfi.p_grid = np.linspace(vfi.p_min,vfi.p_max,vfi.Np)
+        vfi.n_grid = np.linspace(vfi.n_min,vfi.n_max,vfi.Nn)
+        vfi.x_grid = nonlinspace(x_min,vfi.x_max,vfi.Nx,1.1)
 
-		# b. solution objects
-		shape = (par.T,vfi.Np,vfi.Nn,vfi.Nm)
+        # b. solution objects
+        
+        # D = 1
+        if par.D == 1:
 
-		# keeper
-		vfi.sol_sav_share_keep = np.zeros(shape)
-		vfi.sol_v_keep = np.zeros(shape)
+            shape_keep = (par.T,vfi.Np,vfi.Nn,vfi.Nm)
 
-		# adjuster
-		vfi.sol_exp_share_adj = np.zeros(shape)
-		vfi.sol_c_share_adj = np.zeros(shape)
-		vfi.sol_v_adj = np.zeros(shape)
+            # keeper
+            vfi.sol_sav_share_keep = np.zeros(shape_keep)
+            vfi.sol_v_keep = np.zeros(shape_keep)
+            vfi.sol_func_evals_keep = np.zeros(shape_keep)
+            vfi.sol_flag_keep = np.zeros(shape_keep)
 
-		vfi.sol_func_evals_keep = np.zeros(shape)
-		vfi.sol_flag_keep = np.zeros(shape)
-		vfi.sol_func_evals_adj = np.zeros(shape)
-		vfi.sol_flag_adj = np.zeros(shape)
+            # adjuster
+            shape_adjust = (par.T,vfi.Np,vfi.Nx)
+            vfi.sol_exp_share_adj = np.zeros(shape_adjust)
+            vfi.sol_c_share_adj = np.zeros(shape_adjust)
+            vfi.sol_v_adj = np.zeros(shape_adjust)
+            vfi.sol_func_evals_adj = np.zeros(shape_adjust)
+            vfi.sol_flag_adj = np.zeros(shape_adjust)
 
-		# post-decision
-		post_shape = (par.T-1,vfi.Np,vfi.Nn,vfi.Na)
-		vfi.sol_w = np.zeros(post_shape)
+            # adjust durable 1
+            vfi.sol_exp_share_adj1 = np.array([0.0])
+            vfi.sol_c_share_adj1 = np.array([0.0])
+            vfi.sol_v_adj1 = np.array([0.0])
+            vfi.sol_func_evals_adj1 = np.array([0.0])
+            vfi.sol_flag_adj1 = np.array([0.0])
 
-		pos = np.array([1,5,10,25,50,100,500,1000])
-		neg = np.array([1,5,10,25,50,100,500,1000,1500,2000,2500,3000,3500,4000,4500,5000])
-		vfi.transfer_grid = np.concatenate((-np.flip(neg),np.zeros(1),pos))/10_000
-		vfi.Ntransfer = vfi.transfer_grid.size
+            # adjust durable 2
+            vfi.sol_exp_share_adj2 = np.array([0.0])
+            vfi.sol_c_share_adj2 = np.array([0.0])
+            vfi.sol_v_adj2 = np.array([0.0])
+            vfi.sol_func_evals_adj2 = np.array([0.0])
+            vfi.sol_flag_adj2 = np.array([0.0])
+            
+            # adjust both durables
+            vfi.sol_exp_share_adj12 = np.array([0.0])
+            vfi.sol_c_share_adj12 = np.array([0.0])
+            vfi.sol_d1_share_adj12 = np.array([0.0])
+            vfi.sol_v_adj12 = np.array([0.0])
+            vfi.sol_func_evals_adj12 = np.array([0.0])
+            vfi.sol_flag_adj12 = np.array([0.0])
 
-	############
-	# simulate #
-	############
-	
-	def simulate_R(self):
-		""" simulate life time reward"""
+            # post-decision
+            post_shape = (par.T-1,vfi.Np,vfi.Nn,vfi.Na)
+            vfi.sol_w = np.zeros(post_shape)
 
-		par = self.par
-		sim = self.sim
-		vfi = self.vfi
+        # D=2
+        else:
 
-		simulate(par,vfi,sim)
+            shape_keep = (par.T,vfi.Np,vfi.Nn,vfi.Nn,vfi.Nm)
 
-		beta = par.beta 
-		beta_t = np.zeros((par.T,sim.N))
-		for t in range(par.T):
-			beta_t[t] = beta**t
+            # keeper
+            vfi.sol_sav_share_keep = np.zeros(shape_keep)
+            vfi.sol_v_keep = np.zeros(shape_keep)
+            vfi.sol_func_evals_keep = np.zeros(shape_keep)
+            vfi.sol_flag_keep = np.zeros(shape_keep)
 
-		sim.R = np.sum(beta_t*sim.reward)/sim.N
+            # adjuster
+            vfi.sol_exp_share_adj = np.array([0.0])
+            vfi.sol_c_share_adj = np.array([0.0])
+            vfi.sol_v_adj = np.array([0.0])
+            vfi.sol_func_evals_adj = np.array([0.0])
+            vfi.sol_flag_adj = np.array([0.0])
 
-	def compute_transfer_func(self):
-		""" compute VFI utility for different transfer levels"""
+            shape_adjust_single = (par.T,vfi.Np,vfi.Nn,vfi.Nx)
 
-		sim = self.sim
-		vfi = self.vfi
+            # adjust durable 1
+            vfi.sol_exp_share_adj1 = np.zeros(shape_adjust_single)
+            vfi.sol_c_share_adj1 = np.zeros(shape_adjust_single)
+            vfi.sol_v_adj1 = np.zeros(shape_adjust_single)
+            vfi.sol_func_evals_adj1 = np.zeros(shape_adjust_single)
+            vfi.sol_flag_adj1 = np.zeros(shape_adjust_single)
 
-		R_transfer = np.zeros(vfi.Ntransfer)
-		for i, transfer in enumerate(self.vfi.transfer_grid):
-			
-			sim_ = deepcopy(sim) # save
-			
-			sim.states[0,:,0] += transfer
+            # adjust durable 2
+            vfi.sol_exp_share_adj2 = np.zeros(shape_adjust_single)
+            vfi.sol_c_share_adj2 = np.zeros(shape_adjust_single)
+            vfi.sol_v_adj2 = np.zeros(shape_adjust_single)
+            vfi.sol_func_evals_adj2 = np.zeros(shape_adjust_single)
+            vfi.sol_flag_adj2 = np.zeros(shape_adjust_single)
 
-			self.simulate_R()
-			R_transfer[i] = sim.R
-		
-			sim = self.sim = sim_ # reset
+            # adjust both durables
+            shape_adjust_both = (par.T,vfi.Np,vfi.Nx)
+            vfi.sol_exp_share_adj12 = np.zeros(shape_adjust_both)
+            vfi.sol_c_share_adj12 = np.zeros(shape_adjust_both)
+            vfi.sol_d1_share_adj12 = np.zeros(shape_adjust_both)
+            vfi.sol_v_adj12 = np.zeros(shape_adjust_both)
+            vfi.sol_func_evals_adj12 = np.zeros(shape_adjust_both)
+            vfi.sol_flag_adj12 = np.zeros(shape_adjust_both)
 
-		sim.R_transfer = R_transfer
+            # post-decision
+            post_shape = (par.T-1,vfi.Np,vfi.Nn,vfi.Nn,vfi.Na)
+            vfi.sol_w = np.zeros(post_shape)
+        vfi.transfer_grid = sim.transfer_grid 
 
-	########
-	# save #
-	########
-	
-	def save(self,filename):
-		""" save the model """
 
-		# a. create model dict
-		model_dict = self.as_dict()
+    ############
+    # simulate #
+    ############
+    
+    def simulate_R(self):
+        """ simulate life time reward"""
 
-		# b. save to disc
-		with open(f'{filename}', 'wb') as f:
-			pickle.dump(model_dict, f)
+        par = self.par
+        sim = self.sim
+        vfi = self.vfi
 
-	def solve(self):
-		""" solve the model """
+        self.cpp.simulate_cpp(par,vfi,sim)
 
-		par = self.par
-		vfi = self.vfi
+            
+        beta = par.beta 
+        beta_t = np.zeros((par.T,sim.N))
+        for t in range(par.T):
+            beta_t[t] = beta**t
 
-		self.cpp.solve_all(par,vfi)
+        sim.R = np.sum(beta_t[...,None]*sim.reward)/sim.N
+
+    def compute_euler_error(self):
+
+        with jit(self) as model:
+
+            par = model.par 
+            sim = model.sim 
+            vfi = model.vfi 
+
+            if par.D == 1: 
+                self.cpp.compute_euler_errors_cpp(par,sim,vfi)
+            elif par.D == 2:
+                self.cpp.compute_euler_errors_cpp(par,sim,vfi)
+            else:
+                raise('Ooly 1D and 2D implemented')
+
+    def compute_transfer_func(self):
+        """ compute VFI utility for different transfer levels"""
+
+        sim = self.sim
+        par = self.par
+
+        R_transfer = np.zeros(sim.Ntransfer)
+        individual_R_transfer = np.zeros((sim.Ntransfer,sim.N))
+        
+        discount = par.beta ** np.arange(par.T,dtype=float)
+        for i,transfer in enumerate(sim.transfer_grid):
+            
+            sim_ = deepcopy(sim) # save
+            
+            sim.states[0,:,0] += transfer
+
+            self.simulate_R()
+            R_transfer[i] = sim.R
+
+            rewards = self.sim.reward
+            individual_R_transfer[i] = np.sum(rewards*discount[:,None,None],axis=(0,2))
+        
+            sim = self.sim = sim_ # reset
+
+        sim.R_transfer[:] = R_transfer
+        sim.individual_R_transfer[:] = individual_R_transfer
+
+    ########
+    # save #
+    ########
+    
+    def save(self,filename):
+        """ save the model """
+
+        # a. create model dict
+        model_dict = self.as_dict()
+
+        # b. save to disc
+        with open(f'{filename}','wb') as f:
+            pickle.dump(model_dict,f)
+
+    def solve(self):
+        """ solve the model """
+
+        par = self.par
+        vfi = self.vfi
+
+        self.cpp.solve_all(par,vfi)        

@@ -55,7 +55,7 @@ double inverse_marg_util_con(par_struct* par, double mu){
 
 } // inverse_marg_util_con
 
-double compute_q(par_struct* par, egm_struct* egm, long long t, double sigma_xi, double sigma_psi, double m_pd, double p, double rho_p){
+double compute_q(par_struct* par, egm_struct* egm, long long t, double sigma_xi, double sigma_psi, double rho_p, double m_pd, double p){
 
     double q = 0.0; // initialize
 
@@ -134,6 +134,80 @@ double compute_q(par_struct* par, egm_struct* egm, long long t, double sigma_xi,
 
 } // compute q
 
+double compute_q_MoreShocks(par_struct* par, egm_struct* egm, long long t, double m_pd, double p){
+
+    double q = 0.0; // initialize
+
+    // outer loop over which distributions of xi and psi to use
+    for(long long i_pxi = 0; i_pxi < 2; i_pxi++){
+
+        double sigma_xi;
+
+        if (i_pxi == 0) {sigma_xi = par->sigma_xi_1;}
+        else {sigma_xi = par->sigma_xi_2;}
+
+        for(long long i_ppsi = 0; i_ppsi < 2; i_ppsi++){    
+
+            double sigma_psi;
+
+            if (i_ppsi == 0) {sigma_psi = par->sigma_psi_1;}
+            else {sigma_psi = par->sigma_psi_2;}
+
+            // Inner loop for numerical integration over specific distributions of xi and psi
+            for(long long i_psi = 0; i_psi < par->Npsi; i_psi++){
+                
+                for(long long i_xi = 0; i_xi < par->Nxi; i_xi++){
+
+                    // Loop over uneployment outcomes
+                    for (long long i_pv = 0; i_pv < 2; i_pv++){
+
+                        double v = par->u[i_pv];
+
+                        // i. node adjustment
+                        double xi_base = par->xi[i_xi]; // Unpack quadrature node
+                        double xi_ = xi_base*sqrt(2.0)*sigma_xi; // Scale according to sigma
+                        double xi = exp(xi_-0.5*pow(sigma_xi,2.0));
+
+                        double psi_base = par->psi[i_psi];
+                        double psi_ = psi_base*sqrt(2.0)*sigma_psi;
+                        double psi = exp(psi_-0.5*pow(sigma_psi,2.0));
+
+                        // ii. next-period states
+                        double p_plus = pow(p,par->rho_p_base)*xi;
+                        double m_plus;
+
+                        if(t < par->T_retired){
+                            m_plus = par->R*m_pd + psi*p_plus*par->kappa[t]*(1-par->u_replacement*v);
+                        }
+                        else {
+                            m_plus = par->R*m_pd  + par->kappa[t];
+                        }
+
+                        // iii. next-period consumption and marginal utility
+                        long long i_sol_interp_pre = egm->Np*egm->Nm;
+                        long long i_sol_interp = (t+1)*i_sol_interp_pre;
+
+                        double c_plus = linear_interp::interp_2d(
+                        egm->p_grid, egm->m_grid, // grids
+                        egm->Np, egm->Nm, // dimensions
+                        &egm->sol_con[i_sol_interp], // sol_con
+                        p_plus, m_plus); // points
+
+                        double mu_plus = marg_util_con(par,c_plus);
+
+                        // iv. sum up
+                        q += par->mix_xi_w[i_pxi]*par->mix_psi_w[i_ppsi]*par->psi_w[i_psi]*par->xi_w[i_xi]*par->u_w[i_pv]*mu_plus;
+
+                    } // p_v
+                } // xi
+            } // psi
+        } // p_psi
+    } // p_xi
+
+    return q;
+
+} // compute q
+
 void interp_to_common_grid( par_struct* par, egm_struct* egm, double* q_grid, 
                             double* m_temp, double* c_temp, long long q_index, long long sol_con_index){
 
@@ -196,7 +270,7 @@ EXPORT void solve_all(par_struct* par, egm_struct* egm){
                     par->T,egm->Np,egm->Nsigma_xi,egm->Nsigma_psi,egm->Nrho_p,egm->Nm
                 );
                 
-                egm->sol_con[i_sol] = egm->m_grid[i_m]/(1.0+par->bequest);
+                egm->sol_con[i_sol] = egm->m_grid[i_m]/(1.0+par->beta*par->bequest);
 
             } // m-loop
             } // rho_p loop
@@ -225,7 +299,7 @@ EXPORT void solve_all(par_struct* par, egm_struct* egm){
                 double sigma_xi = egm->sigma_xi_grid[i_sigma_xi];
                 double sigma_psi = egm->sigma_psi_grid[i_sigma_psi];
                 double rho_p = egm->rho_p_grid[i_rho_p];
-                double a = egm->m_pd_grid[i_m_pd];
+                double m_pd = egm->m_pd_grid[i_m_pd];
                                             
                 if (par->Nstates_fixed == 0){
                     sigma_xi = par->sigma_xi_base;
@@ -239,8 +313,13 @@ EXPORT void solve_all(par_struct* par, egm_struct* egm){
                 else if (par->Nstates_fixed == 2){
                     rho_p = par->rho_p_base;
                 }
-
-                double q = compute_q(par,egm,t,sigma_xi,sigma_psi,a,p,rho_p);
+                
+                double q;
+                if(par->MoreShocks){
+                    q = compute_q_MoreShocks(par,egm,t,m_pd,p);
+                } else {
+                    q = compute_q(par,egm,t,sigma_xi,sigma_psi,rho_p,m_pd,p);
+                }
 
                 long long i_q = index::d5(i_p,i_sigma_xi,i_sigma_psi,i_rho_p,i_m_pd,
                     egm->Np,egm->Nsigma_xi,egm->Nsigma_psi,egm->Nrho_p,egm->Nm_pd

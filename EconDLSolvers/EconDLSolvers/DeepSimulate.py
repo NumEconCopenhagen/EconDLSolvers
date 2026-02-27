@@ -1,3 +1,4 @@
+import time
 import torch
 
 # for distributed training
@@ -32,11 +33,7 @@ def setup(model):
 
 	# c. solver and exploration
 	train.sim_R_freq = 50 # simulation frequency
-	train.k_min = 500 # minimum number of iterations
-	train.Delta_k = 200 # number of iterations without improvement before termination
-
-
-	train.start_train_policy = -1
+	train.start_train_policy = -1 # always train policy
 
 	# d. not used
 	train.batch_size  = None
@@ -45,19 +42,36 @@ def setup(model):
 	train.Delta_epoch_value = None
 	train.epoch_policy_min = None
 	train.epoch_termination = None
+	train.epoch_use_best = None
 	train.epoch_value_min = None
-	train.epsilon_sigma = None
-	train.epsilon_sigma_decay = None
-	train.epsilon_sigma_min = None
+	train.eq_w = None
+	train.FOC_weight_pol = None
+	train.FOC_weight_val = None
+	train.learning_rate_policy_decay_t = None
+	train.learning_rate_policy_schedule = None
+	train.learning_rate_policy_t = None
 	train.learning_rate_value = None
 	train.learning_rate_value_decay = None
+	train.learning_rate_value_decay_t = None
 	train.learning_rate_value_min = None
+	train.learning_rate_value_schedule = None
+	train.learning_rate_value_t	= None
+	train.N_target_batches = None
+	train.N_value_NN = None
 	train.Nepochs_policy = None
+	train.Nepochs_policy_t = None
 	train.Nepochs_value = None
+	train.Nepochs_value_t = None
+	train.NFOC_targets = None
 	train.Nneurons_value = None
+	train.Nneurons_value_t = None
 	train.tau = None
+	train.tau_schedule = None
+	train.use_FOC = None
 	train.use_target_policy = None
 	train.use_target_value = None	
+	train.value_weight_pol = None
+	train.value_weight_val = None
 
 def create_NN(model):
 	""" create neural nets """
@@ -71,6 +85,8 @@ def create_NN(model):
 def update_NN(model):
 	""" update neural net parameters """
 	
+	t0 = time.perf_counter()
+
 	# a. unpack
 	par = model.par
 	train = model.train
@@ -79,21 +95,28 @@ def update_NN(model):
 	# b. get initial conditions and shocks
 	initial_states = train.states[0]
 	shocks = train.shocks
+	epsilon_sigma = train.epsilon_sigma
 
 	# c. update policy
-	policy_loss = aux.policy_update_step(model,policy_loss_f,initial_states,shocks)
+	if epsilon_sigma is None or epsilon_sigma.sum() == 0:
+		eps = None # no exploration
+	else:
+		eps = model.draw_exploration_shocks(epsilon_sigma,train.N).to(train.dtype).to(train.device) # shape = (T,N,Nactions)
+	
+	policy_loss = aux.policy_update_step(model,policy_loss_f,initial_states,shocks,eps)
 	
 	# d. store
 	info[('policy_loss',train.k)] = policy_loss
 	info[('value_epochs',train.k)] = 0	
 	info[('policy_epochs',train.k)] = 1
+	info['time.update_NN.train_policy'] += time.perf_counter()-t0
 
-def policy_loss_f(model,initial_states,shocks):
+def policy_loss_f(model,initial_states,shocks,eps=None):
 	""" policy loss """
 	
 	policy_NN = model.policy_NN
 
-	policy_loss = simulate_DeepSimulate(model,policy_NN,initial_states,shocks)
+	policy_loss = simulate_DeepSimulate(model,policy_NN,initial_states,shocks,eps=eps)
 	
 	return policy_loss
 

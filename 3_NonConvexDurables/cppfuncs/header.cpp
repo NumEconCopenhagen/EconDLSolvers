@@ -45,8 +45,9 @@ typedef struct {
     
     par_struct *par;
     vfi_struct *vfi;
-    long long t, i_p, func_evals, Nchoices;
-    double m,n,p, c, d, exp_share, c_share, sav_share;
+    long long t, i_p, func_evals, Nchoices, adjustment_type;
+    double m, n, x, n1, n2, p, c, d, exp_share, c_share, sav_share;
+    bool use_2d_objective;
 
 } solver_struct;
 
@@ -69,4 +70,12 @@ typedef struct {
 
 #ifndef SOLVE_ADJ
 #include "solve_adj.cpp"
+#endif
+
+#ifndef SIMULATE
+#include "simulate.cpp"
+#endif
+
+#ifndef EULER_ERRORS
+#include "euler_errors.cpp"
 #endif

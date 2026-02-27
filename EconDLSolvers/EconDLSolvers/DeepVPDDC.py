@@ -15,17 +15,13 @@ def setup(model):
 
 	train = model.train
 
-	# a. targets
-	train.tau = 0.2 # target smoothing coefficient
 	train.use_target_policy = False
-	train.use_target_value = True
 
-	# b. misc
-	train.store_pd = True # store pd states in replay buffer
+	# a. default
+	train.store_pd = True
 
-	# c. FOC
-	train.start_train_policy = 10
-	train.use_FOC = False
+	# b. not used
+	train.eq_w = None
 
 def create_NN(model):
 	""" create neural nets """
@@ -44,16 +40,17 @@ def update_NN(model):
 	# unpack
 	train = model.train
 
-	assert not train.terminal_actions_known, "Terminal actions can not be known for DeepVPDDC"
+	if train.terminal_actions_known:
+		raise NotImplementedError('terminal_actions_known=True is not supported for DeepVPDDC')
 
 	# a. sample
 	batch = model.rep_buffer.sample(train.batch_size)
 	states, states_pd = batch.states, batch.states_pd
 
-	states_pd = states_pd[:-1]
+	states_pd = states_pd[:-1] # terminal reward is always known
 
 	# b. update value
-	aux.train_value(model,compute_target,value_loss_f,states_pd)
+	aux.train_value(model,value_loss_f,states_pd)
 
 	# c. update target value
 	if train.use_target_value: aux.update_target_value_network(model)
@@ -70,78 +67,7 @@ def update_NN(model):
 ###################
 # value training #
 ###################
-
-def choice_prob(par,v0):
-	""" compute choice probabilities """
-
-	choice_probs = torch.zeros_like(v0)
-	vmax = torch.max(v0,dim=-1,keepdim=True)[0]
-	v_vmax = (v0-vmax)/par.sigma_eps
-	for d in range(par.NDC):
-		choice_probs[...,d] = torch.exp(v_vmax[...,d])/torch.sum(torch.exp(v_vmax),dim=-1)
-	
-	return choice_probs
-
-def compute_target(model,states_pd):
-	""" compute target """
-
-	# a. unpack
-	par = model.par
-	train = model.train
-	dtype = train.dtype
-	device = train.device
-	
-	if train.use_target_value:
-		value_NN = model.value_NN_target
-	else:
-		value_NN = model.value_NN
-
-	if train.use_target_policy:
-		policy_NN = model.policy_NN_target
-	else:
-		policy_NN = model.policy_NN
-
-	# b. compute target
-	with torch.no_grad():
-
-		# i. future states
-		states_plus = model.state_trans(states_pd,train.quad) # shape = (T,N,Nquad,Nstates)
-
-		# ii. future actions
-		actions_plus = model.eval_policy(policy_NN,states_plus,t0=1)
-
-		# iii. future reward
-		outcomes_plus = model.outcomes(states_plus,actions_plus,t0=1) # shape = (T,N,Nquad,NDC)
-		reward_plus = model.reward(states_plus,actions_plus,outcomes_plus,t0=1) # shape = (T,N,Nquad,NDC)
-
-		# iv. future post-decision states
-		states_pd_plus = model.state_trans_pd(states_plus,actions_plus,outcomes_plus,t0=1).permute(0,1,2,4,3) # swap last two dimensions
-
-		# v. future post-decision value
-		value_pd_plus_before = model.eval_value_pd(value_NN,states_pd_plus[:-1],t0=1)[...,0]
-		value_pd_plus_after = model.terminal_reward_pd(states_pd_plus[-1:])[...,0]
-		value_pd_plus = torch.cat([value_pd_plus_before,value_pd_plus_after],dim=0)
-
-		# vi. future value function
-		discount_factor = model.discount_factor(states_plus,t0=1)[...,None]
-		value_plus = (reward_plus + discount_factor*value_pd_plus).reshape(-1,train.Nquad,par.NDC)
-
-
-		# vii. expected future value
-		target_value_quad = par.sigma_eps*torch.logsumexp(value_plus/par.sigma_eps,dim=-1,keepdim=False)
-		target_value = torch.sum(target_value_quad*train.quad_w[None,:],dim=-1,keepdim=True) # target post-decision value function
-
-		# iv. FOC
-		if train.use_FOC:
 			
-			choice_probs = choice_prob(par,value_plus)
-
-			q = model.marginal_reward(states_plus,actions_plus,outcomes_plus,t0=1).reshape(-1,train.Nquad,par.NDC)
-			target_q = torch.sum(torch.sum(q*choice_probs,dim=-1,keepdim=False)*train.quad_w[None,:],dim=1,keepdim=True)
-			target_value = torch.cat([target_value,target_q],dim=1)	
-
-	return target_value
-
 def value_loss_f(model,target,states_pd):
 	""" value loss """
 
@@ -149,22 +75,27 @@ def value_loss_f(model,target,states_pd):
 	train = model.train
 	value_NN = model.value_NN
 
-	# b. prediction
-	pred = model.eval_value_pd(value_NN,states_pd)
+	target_value_pd, target_q_pd = target
+
+	# b. baslie
+	pred = model.eval_value(value_NN,states_pd)
+
 	value_pd_pred = pred[...,0].reshape(-1,1)
+	value_pd_loss = train.value_weight_val * F.mse_loss(value_pd_pred,target_value_pd)
 
-	# c. targets
-	target_val = target[...,0].reshape(-1,1)
-
-	# d. loss
-	loss = F.mse_loss(value_pd_pred,target_val)
 	if train.use_FOC:
-		q_pred = pred[...,1].reshape(-1,1)
-		target_q = target[...,1].reshape(-1,1)
-		loss += F.mse_loss(q_pred,target_q)	
 
-	return loss
+		# i. FOC
+		q_pd_pred = pred[...,1:].reshape(-1,train.NFOC_targets)
+		q_pd_loss = F.mse_loss(q_pd_pred,target_q_pd)*train.NFOC_targets 
+		# note: multiply with NFOC_targets to get same scale as value loss
+		
+		# ii. add to loss
+		value_pd_loss += train.FOC_weight_val*q_pd_loss
 
+	if train.allow_synchronize and torch.cuda.is_available(): torch.cuda.synchronize(device=train.device)
+	return value_pd_loss
+	
 ###################
 # policy training #
 ###################
@@ -176,49 +107,75 @@ def policy_loss_f(model,states):
 	par = model.par
 	train = model.train
 	policy_NN = model.policy_NN
-	if train.N_value_NN is None:
-		value_NN = model.value_NN
+
+	if train.target_value_in_policy:
+
+		if train.N_value_NN is None:
+			value_NN = model.value_NN_target
+		else:
+			value_NN = model.value_NN_targets
+
 	else:
-		value_NN = model.value_NNs
 
-	if train.use_input_scaling:
-		raise NotImplementedError("Input scaling not implemented")
+		if train.N_value_NN is None:
+			value_NN = model.value_NN
+		else:
+			value_NN = model.value_NNs
 	
-	# b. compute loss
-	
-	# i. actions
-	actions = model.eval_policy(policy_NN,states)
+	# b. actions
+	actions = model.eval_policy(policy_NN,states) # shape = (T,N,Nactions)
 
-	# ii. current reward
-	outcomes = model.outcomes(states,actions)
-	reward = model.reward(states,actions,outcomes)
+	# c. current reward
+	outcomes = model.outcomes(states,actions) # shape = (T,N,Noutcomes)
+	reward = model.reward(states,actions,outcomes) # shape = (T,N,NDC)
+	mask_feasible = reward > -1e6
+
+	# d. post-decision states
+	states_pd = model.state_trans_pd(states,actions,outcomes) # shape = (T,N,Nstates_pd,NDC)
+	states_pd = states_pd.permute(0,1,3,2) # swap last two dimensions, shape = (T,N,NDC,Nstates_pd)
+
+	# e. post-decision value
+	value_pd,q_pd = compute_valueq_pd(model,states_pd,value_NN) # shape = (T,N,NDC)
+
+	# f. value of choice
+	discount_factor = model.discount_factor(states)[...,None]
+	value_of_choice = reward + discount_factor * value_pd # shape = (T,N,NDC)
+
+	# g. loss 
+	#loss =  train.value_weight_pol*-torch.mean(value_of_choice)
+	loss = train.value_weight_pol*-torch.mean(value_of_choice[mask_feasible])
+
+	# h. FOC
 	if train.use_FOC:
-		marginal_reward = model.marginal_reward(states,actions,outcomes)
+		# Non-terminal periods use q_pd from value network
+		eq_ = model.eval_equations_DeepVPDDC(states[:-1], actions[:-1], outcomes[:-1], states_pd[:-1], q_pd)
+		# Terminal period uses analytical terminal condition
+		eq_terminal = model.eval_equations_DeepVPDDC_terminal(states[-1:], actions[-1:], outcomes[-1:], states_pd[-1:])
+		eq = torch.cat((eq_, eq_terminal), dim=0)
 
-	# iii. post-decision states
-	states_pd = model.state_trans_pd(states,actions,outcomes)
-
-	# iv. post-decision value
-	states_pd_ = states_pd.permute(0,1,3,2) # swap dim 2 and 3
-
-	val_pred_before = model.eval_value_pd(value_NN,states_pd_[:-1])
-	val_pred_after = model.terminal_reward_pd(states_pd_[-1:])[...,0] # terminal period value
-	value_pd_pred = torch.cat([val_pred_before[...,0],val_pred_after],dim=0)
-
-
-	# v. choices-specific value
-	discount_factor = model.discount_factor(states)[...,None] # add
-
-	value = reward + discount_factor * value_pd_pred
-
-	# vi. loss 
-	loss = - torch.mean(value)
-
-	if train.use_FOC:
-		pred_ = val_pred_before[...,1]
-		eq_error = model.eval_equations_DeepVPDDC(states,actions,marginal_reward,pred_)
-		loss += torch.mean(eq_error)
-
-
+		# eq.shape = (T, N, NDC)
+		loss += train.FOC_weight_pol * torch.mean(eq)
 
 	return loss
+
+def compute_valueq_pd(model,states_pd,value_NN):
+	""" compute post-decision value given current states and actions"""
+	
+	# unpack
+	train = model.train
+
+	# a. eval
+	valueq_pd_ = model.eval_value(value_NN,states_pd[:-1])
+	
+	# b. value
+	value_pd_ = valueq_pd_[...,0]
+	value_pd_terminal = model.terminal_reward_pd(states_pd[-1:])
+	value_pd = torch.cat([value_pd_,value_pd_terminal],dim=0)
+	
+	# c. marginal value
+	if train.use_FOC:
+		q_pd = valueq_pd_[...,1:]
+	else:
+		q_pd = None
+
+	return value_pd,q_pd

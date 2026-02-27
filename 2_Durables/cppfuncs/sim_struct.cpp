@@ -12,6 +12,7 @@ typedef struct sim_struct
  double* euler_error;
  double* MPC_c;
  double* MPC_d;
+ double* MPX;
  double* R_transfer;
  double* R_transfers;
 } sim_struct;
@@ -36,6 +37,7 @@ double* get_double_p_sim_struct(sim_struct* x, char* name){
  else if( strcmp(name,"euler_error") == 0 ){ return x->euler_error; }
  else if( strcmp(name,"MPC_c") == 0 ){ return x->MPC_c; }
  else if( strcmp(name,"MPC_d") == 0 ){ return x->MPC_d; }
+ else if( strcmp(name,"MPX") == 0 ){ return x->MPX; }
  else if( strcmp(name,"R_transfer") == 0 ){ return x->R_transfer; }
  else if( strcmp(name,"R_transfers") == 0 ){ return x->R_transfers; }
  else {return NULL;}

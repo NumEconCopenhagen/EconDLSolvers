@@ -1,11 +1,15 @@
 import numpy as np
+import pandas as pd
+import torch
 import matplotlib.pyplot as plt
+from IPython.display import display
 
 from .auxilliary import compute_transfer
 
 def convergence_plot(model,
                      y_fac=1.0,ylabel='transfer',
-                     folder='',postfix='',close_fig=True,filetype='svg',do_plot=True):
+                     folder='',postfix='',close_fig=True,filetype='svg',
+                     do_plot=True,only_best=True):
     """ check for convergence (and plot) """
 
     train = model.train
@@ -19,10 +23,11 @@ def convergence_plot(model,
 
         R = model.info[('R',k)]
         if np.isnan(R): continue
-        if R > best_R: 
-            best_R = R
-        else:
-            continue
+        if only_best:
+            if R > best_R: 
+                best_R = R
+            else:
+                continue
 
         x.append(model.info[('k_time',k)]/60)
         transfer = compute_transfer(model.info['R_transfer'],train.transfer_grid,R)
@@ -58,7 +63,7 @@ def convergence_plot(model,
         # iii. details
         ax.set_xlim([0,train.K_time])
         ax.set_ylim([y_fac*train.transfer_grid[0],y_fac*(-train.transfer_grid[-2])])
-        ax.set_xlabel('time (m)')
+        ax.set_xlabel('minutes')
         ax.set_ylabel(ylabel)
 
         # iv. save
@@ -82,3 +87,59 @@ def convergence_plot(model,
         return Delta_time_within_transfer > train.Delta_time
     else:
         return False  
+
+def get_all_hyperparams(models):
+
+    exclude = [
+        'algoname',
+        'device',
+        'k',
+        'R',
+        'states',
+        'actions',
+        'outcomes',
+        'reward',
+        'states_pd',
+        'shocks',
+        'numint_nodes',
+        'numint_weights',
+        'explore_frac',
+        'transfer_grid',
+        'Nnumint',
+        'allow_synchronize'
+    ]
+
+    params = set()
+    for model in models.values(): params.update(set(model.train.__dict__.keys()))
+    params = params.difference(set(exclude))
+
+    return params
+    
+def compare_hyperparams(models,include=None,exclude=None):
+
+    rows = get_all_hyperparams(models)
+    if not exclude is None: rows = rows.difference(exclude)
+    if not include is None: rows = rows.intersection(include)
+
+    cols = [k for k in models.keys()]
+    df = pd.DataFrame(index=sorted(rows),columns=cols)
+
+    # b. fill
+    for row in rows:
+        for algoname,model in models.items():
+            if row in model.train.__dict__:
+                v = model.train.__dict__[row]
+                if v is None:
+                    df.loc[row,algoname] = 'None'
+                elif isinstance(v,(np.ndarray,torch.Tensor)):
+                    if len(v) > 3:
+                        df.loc[row,algoname] = f'{type(v).__name__}, {v.shape}'
+                    else:
+                        df.loc[row,algoname] = v
+                else:
+                    df.loc[row,algoname] = v
+            else:
+                df.loc[row,algoname] = 'missing'
+
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+        display(df)                

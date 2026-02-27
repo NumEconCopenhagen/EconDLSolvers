@@ -18,19 +18,29 @@ def setup(model):
 	""" setup training parameters"""
 
 	train = model.train
+
+	# a. default
+	train.track_sim_policy_loss = False
+	train.N_sample_policy_loss = 100
 	
-	# a. not used
-	train.Nneurons_value = None
+	# b. not used
+	train.clip_grad_value = None
+	train.Delta_epoch_value = None
+	train.epoch_value_min = None
+	train.FOC_weight_pol = None
+	train.FOC_weight_val = None
 	train.learning_rate_value = None
 	train.learning_rate_value_decay = None
 	train.learning_rate_value_min = None
 	train.Nepochs_value = None
-	train.Delta_epoch_value = None
-	train.epoch_value_min = None
+	train.NFOC_targets = None
+	train.Nneurons_value = None
 	train.tau = None
+	train.use_FOC = None
 	train.use_target_policy = None
 	train.use_target_value = None	
-	train.clip_grad_value = None
+	train.value_weight_pol = None
+	train.value_weight_val = None
 
 def create_NN(model):
 	""" create neural nets """
@@ -49,7 +59,7 @@ def update_NN(model):
 
 	# b. sample
 	batch = model.rep_buffer.sample(train.batch_size)
-	states = batch.states
+	states = batch.states # shape = (T,N,Nstates)
 
 	if train.terminal_actions_known: states = states[:-1]
 
@@ -64,39 +74,48 @@ def policy_loss_f(model,states):
 	policy_NN = model.policy_NN
 
 	# b. actions today
-	actions = model.eval_policy(policy_NN,states)
-	outcomes = model.outcomes(states,actions)
+	actions = model.eval_policy(policy_NN,states) # shape = (T,N,Nactions)
+	outcomes = model.outcomes(states,actions) # shape = (T,N,Nactions)
 
 	# c. post-decision states
-	states_pd = model.state_trans_pd(states,actions,outcomes=outcomes)
+	states_pd = model.state_trans_pd(states,actions,outcomes=outcomes) # shape = (T,N,Nstates_pd)
 
 	# d. future states
 	if train.terminal_actions_known:
-		states_plus = model.state_trans(states_pd,train.quad)
+		states_plus = model._state_trans(states_pd) # shape = (T,N,Nnumint,Nstates)
 	else:
-		states_plus = model.state_trans(states_pd[:-1],train.quad)
+		states_plus = model._state_trans(states_pd[:-1]) # shape = (T,N,Nnumint,Nstates)
 	
 	# e. future actions
 	if train.terminal_actions_known:
 		actions_plus_before = model.eval_policy(policy_NN,states_plus[:-1],t0=1)
 		actions_plus_terminal = model.terminal_actions(states_plus[-1:])
 		actions_plus = torch.cat((actions_plus_before,actions_plus_terminal),dim=0)
+		outcomes_plus = model.outcomes(states_plus,actions_plus,t0=1)
 	else:
 		actions_plus = model.eval_policy(policy_NN,states_plus,t0=1)
-
-	outcomes_plus = model.outcomes(states_plus,actions_plus,t0=1)
+		outcomes_plus = model.outcomes(states_plus,actions_plus,t0=1)
 
 	# f. evaluate equations
 
 	# states.shape = (T,N,Nstates)
 	# actions.shape = (T,N,Nactions)
-	# states_plus.shape = (T,N,Nquad,Nstates)
-	# actions_plus.shape = (T,N,Nquad,Nactions)	
+	# outcomes.shape = (T,N,Nactions)
+	# states_plus.shape = (T,N,Nnumint,Nstates)
+	# actions_plus.shape = (T,N,Nnumint,Nactions)	
+	# outcomes_plus.shape = (T,N,Nnumint,Nactions)	
 
-	equations = model.eval_equations_FOC(states,states_plus,actions,actions_plus,outcomes,outcomes_plus)
-	
-	# take sum across equations weighted with Neq_w
-	equations = torch.sum(equations*train.eq_w[None,None,:],dim=-1)
+	if train.terminal_actions_known:
+		equations = model.eval_equations_FOC(states,states_plus,actions,actions_plus,outcomes,outcomes_plus)
+	else:
+		equations_ = model.eval_equations_FOC(states[:-1],states_plus,actions[:-1],actions_plus,outcomes[:-1],outcomes_plus)
+		equations_terminal = model.eval_equations_FOC_terminal(states[-1:],actions[-1:],outcomes[-1:],states_pd[-1:])
+		equations = torch.cat((equations_,equations_terminal),dim=0)
+
+	# equations.shape = (T,N,Nequations)
+
+	# take sum across equations weighted with eq_w
+	equations = torch.sum(train.eq_w[None,None,:]*equations,dim=-1)
 
 	# g. compute loss
 	policy_loss = torch.mean(equations)

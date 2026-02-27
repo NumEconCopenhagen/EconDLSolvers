@@ -35,7 +35,7 @@ class DurablesModelEGMClass(EconModelClass,DurablesModelClass):
 
         # cpp
         self.cpp_filename = 'cppfuncs/main.cpp'
-        self.cpp_options = {'compiler':'intel'}	
+        self.cpp_options = {'compiler':'vs'}	
 
     def setup(self):
         """ choose parameters """
@@ -55,8 +55,8 @@ class DurablesModelEGMClass(EconModelClass,DurablesModelClass):
         egm.Nm = 100 # number of grid points
         egm.Nn = 100 # number of grid points
 
-        egm.m_pd_max = 5.0 # max end-of-period assets
-        egm.m_max = 5.0 # max cash-on-hand
+        egm.m_pd_max = 15.0 # max end-of-period assets
+        egm.m_max = 15.0 # max cash-on-hand
         egm.m_min = 1e-4 # min cash-on-hand
 
         egm.p_max = 4.0 # max permanent income
@@ -112,8 +112,8 @@ class DurablesModelEGMClass(EconModelClass,DurablesModelClass):
         egm.sol_d3_fac = np.zeros(sol_tuple) if par.D > 2 else np.zeros(1)
         egm.sol_m_pd_fac = np.zeros(sol_tuple)
 
-        egm.sol_func_evals = np.zeros(sol_tuple,dtype=np.int_)
-        egm.sol_flag = np.zeros(sol_tuple,dtype=np.int_)		
+        egm.sol_func_evals = np.zeros(sol_tuple)
+        egm.sol_flag = np.zeros(sol_tuple)		
         
         # iii. other solution objects
         keep_decision_tuple = (egm.Np,) + D_tuple + (egm.Nm_keep,)
@@ -238,7 +238,7 @@ class DurablesModelEGMClass(EconModelClass,DurablesModelClass):
 
         # b. save to disc
         with open(f'{filename}', 'wb') as f:
-            pickle.dump(model_dict, f)	
+            torch.save(model_dict,f)	
 
     def interp_actions(self, states, t):
         """ interpolate actions """

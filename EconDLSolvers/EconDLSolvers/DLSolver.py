@@ -1,84 +1,36 @@
-import os
-import json 
-import datetime
 from copy import deepcopy
 from types import SimpleNamespace
-import cProfile
 import numpy as np
-import pickle
-import pstats
 import time
 import torch
 
 # local
+from . import neural_nets
 from . import replay_buffer
+from . import save_load
+from . import timings
+from . import figs
+from .DDP import solve_DDP, _solve_DDP_process
+from .simulate import simulate
+from .manual_termination import solving_json, check_solving_json
+
 from . import DeepSimulate
-from . import DeepQ
 from . import DeepFOC
-from . import DeepV
+from . import DeepFOCBackward
 from . import DeepVPD
 from . import DeepVPDDC
-
-from . import neural_nets
-from .DDP import solve_DDP, _solve_DDP_process
-from .gpu import get_free_memory
-from .simulate import simulate
-from . import figs
+from . import DeepVPDBackward
+from . import DeepVPDDCBackward
 
 algos = {
     'DeepSimulate': DeepSimulate,
     'DeepFOC': DeepFOC,
-    'DeepV': DeepV,
+    'DeepFOCBackward': DeepFOCBackward,
     'DeepVPD': DeepVPD,
-    'DeepQ': DeepQ,
     'DeepVPDDC': DeepVPDDC,
+    'DeepVPDBackward': DeepVPDBackward,
+    'DeepVPDDCBackward': DeepVPDDCBackward
 }
-
-def solving_json(postfix):
-
-    filename = "solving.json"
-
-    # check if the file exists
-    if not os.path.exists(filename):
-        with open(filename, 'w') as file:
-            json.dump([], file)
-
-    # read the existing data from the file
-    with open(filename, 'r') as file:
-        data = json.load(file)
-
-    # add a new row with the current timestamp and the value false
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_entry = {}
-    if not postfix == '': new_entry['postfix'] = postfix
-    new_entry['timestamp'] = timestamp
-    new_entry['terminate'] = False
-    data.append(new_entry)
-
-    # write the updated data back to the file
-    with open(filename, 'w') as file:
-        json.dump(data, file, indent=4)
-
-    return timestamp
-
-def check_solving_json(timestamp):
-
-    filename = "solving.json"
-
-    try:
-
-        with open(filename, 'r') as file:
-            data = json.load(file)
-
-        for entry in data:
-            if entry.get('timestamp') == timestamp:
-                terminate = entry.get('terminate', None)
-
-        return terminate == True
-
-    except Exception:
-
-        return False
     
 class DLSolverClass():
     """ generic solution algorithm """
@@ -89,12 +41,15 @@ class DLSolverClass():
 
     def __init__(self,
               algoname=None,device=None,dtype=None,par=None,sim=None,train=None,
-              torch_rng_state=None,show_memory=False,load=None):
+              torch_rng_state=None,load=None):
         """ initialize """
 
-        if not torch.cuda.is_available(): show_memory = False
-
-        assert device is not None, 'device must be specified'
+        assert device is not None, 'device must be specified'            
+        # check if device is a tuple with 2 elements
+        if isinstance(device, tuple):
+            device,device_name = device
+        else:
+            device_name = None
 
         if load is not None:
 
@@ -103,17 +58,14 @@ class DLSolverClass():
             assert par is None, 'par must be None when loading'
             assert train is None, 'train must be None when loading'
             assert torch_rng_state is None, 'torch_rng_state must be None when loading'
-            assert not show_memory, 'show_memory must be False when loading'
             
             with open(f'{load}', 'rb') as f:
-                load_dict = pickle.load(f)
+                load_dict = torch.load(f,map_location=device,weights_only=False)
 
             algoname = load_dict['train'].algoname
             dtype = load_dict['train'].dtype
-
-        if show_memory:
-            free_GB_0 = get_free_memory(device)
-            print(f'initial: {free_GB_0:.2f}GB free')
+            par = load_dict['par'].__dict__
+            train = load_dict['train'].__dict__
 
         assert algoname is not None, 'algoname must be specified'
         if dtype is None: dtype = torch.float32
@@ -128,12 +80,14 @@ class DLSolverClass():
 
         self.train.algoname = algoname
         self.train.device = device
+        self.train.device_name = device_name
         self.train.dtype = dtype
 
         self.policy_NN = None
         self.value_NN = None
         self.policy_NN_target = None
-        self.value_NN_target = None		
+        self.value_NN_target = None
+        
         self.info = {}
         self.info_timing = {}
 
@@ -155,17 +109,14 @@ class DLSolverClass():
 
         for k,v in par.items(): self.par.__dict__[k] = v # overwrite with call-specific parameters
         for k,v in sim.items(): self.sim.__dict__[k] = v # overwrite with call-specific parameters
+        
         self.allocate()
 
-        if show_memory: 
-            free_GB_1 = get_free_memory(device) 
-            print(f'setup()+allocate(): {free_GB_0-free_GB_1:.2f}GB allocated')
-
         # checks
-        parnames = ['T','Nstates','Nstates_pd','Nshocks','Noutcomes','Nactions'] 
+        parnames = ['T','Nstates','Nstates_pd','Nshocks','Noutcomes','Nactions','NDC'] 
         for name in parnames: assert hasattr(self.par,name), f'Parameter par.{name} must be specified'
         
-        simnames = ['N']  
+        simnames = ['N','reps']  
         for name in simnames: assert hasattr(self.sim,name), f'Parameter sim.{name} must be specified'
 
         # d. setup and allocate train
@@ -176,57 +127,43 @@ class DLSolverClass():
         for k,v in train.items(): self.train.__dict__[k] = v # overwrite with call-specific parameters
 
         self.allocate_train()
-        # get quad if self.quad exists
-        if hasattr(self,'quad'): 
-            self._get_quad()
-
-        if show_memory: 
-            free_GB_2 = get_free_memory(device) 
-            print(f'setup_train()+allocate_train()+quad(): {free_GB_1-free_GB_2:.2f}GB allocated')
 
         # checks
         assert hasattr(self.train,'policy_activation_final'), 'train.policy_activation_final must be specified'
+        assert type(self.train.policy_activation_final) is list, 'train.policy_activation_final must be a list'
+        assert len(self.train.policy_activation_final) == self.par.Nactions, 'train.policy_activation_final must have the same length as Nactions'
+        
         assert hasattr(self.train,'min_actions'), 'train.min_actions must be specified'
         assert hasattr(self.train,'max_actions'), 'train.max_actions must be specified'
-        assert len(self.train.policy_activation_final) in {self.par.Nactions, 1}, 'train.policy_activation_final must have the same length as Nactions or have length 1'
+        
         assert len(self.train.min_actions) == self.par.Nactions, 'train.min_actions must have same length as Nactions'
         assert len(self.train.max_actions) == self.par.Nactions, 'train.max_actions must have same length as Nactions'
+
         if not self.train.epsilon_sigma is None:
             assert len(self.train.epsilon_sigma) == self.par.Nactions, 'train.epsilon_sigma must have same length as Nactions'
             assert len(self.train.epsilon_sigma_min) == self.par.Nactions, 'train.epsilon_sigma_min must have same length as Nactions'
 
-        # e. prepate simulation
+        if algoname == 'DeepSimulate': assert not self.train.do_sim_eps, 'do_sim_eps = True is not implemented for DeepSimulate'
+        if self.train.update_numint_weights: 
+            assert not algoname == 'DeepFOC', 'update_numint_weights = True is not implemented for DeepFOC'
+
+        # e. prepare simulation
         if load is None: self.prepare_simulate_R(torch_rng_state=torch_rng_state)
 
         # f. allocate DL solver
+
+        # numerical integration
+        if hasattr(self,'numerical_integration'): 
+            self._numerical_integration()
+
         self.allocate_DLSolver()
 
-        if show_memory: 
-            free_GB_3 = get_free_memory(device) 
-            print(f'allocate_DLSolver(): {free_GB_2-free_GB_3:.2f}GB allocated')
-            print(f'final: {free_GB_3:.2f}GB free')
+        # g. overwrite
+        if load is not None: save_load.load(self,load_dict)
 
-        # i. overwrite
-        if load is not None:
-
-            # o. par, sim and train
-            nss = ['par','sim','train','sim_eps']
-            for ns in nss:
-                if ns in load_dict:
-                    if not hasattr(self,ns): self.__dict__[ns] = SimpleNamespace()
-                    for k,v in load_dict[ns].__dict__.items():					
-                        if isinstance(v,np.ndarray): 
-                            self.__dict__[ns].__dict__[k] = torch.tensor(v,device=self.train.device,dtype=self.train.dtype)
-                        else: 
-                            self.__dict__[ns].__dict__[k] = v
-
-            # oo. info
-            self.info = load_dict['info']
-            self.info_timing = load_dict['info_timing']
-
-            # ooo. nets
-            self.policy_NN.load_state_dict(load_dict['policy_NN'])
-            if 'value_NN' in load_dict: self.value_NN.load_state_dict(load_dict['value_NN'])
+        if not self.train.epsilon_sigma is None:
+            self.train.epsilon_sigma = self.train.epsilon_sigma.to(device)
+            self.train.epsilon_sigma_min = self.train.epsilon_sigma_min.to(device)        
 
     def _fetch_algo_functions(self,algoname):
         """ fetch functions from algorithm"""
@@ -246,7 +183,7 @@ class DLSolverClass():
             self.algo.__dict__[name] = eval(f'algomodule.{name}')
         
         # c. optional
-        algo_names_optional = ['create_target_NN', 'transfer_nets_to_device','update_NN_DDP','compute_discrete_choice_prob_from_NN','policy_loss_f']
+        algo_names_optional = ['create_target_NN','update_NN_DDP','policy_loss_f', 'solve_backward']
         for name in algo_names_optional: 
             try:
                 self.algo.__dict__[name] = eval(f'algomodule.{name}')
@@ -266,97 +203,174 @@ class DLSolverClass():
     def _setup_train_default(self):
         """ setup default parameters """
 
+        par = self.par
         train = self.train
 
-        # a. neural nets
-        train.Nneurons_value = np.array([500,500]) # size and number of layers
-        train.value_activation_intermediate = 'relu'
-        train.N_value_NN = None # number of value networks
+        # a. neural networks and learning rates
         train.Nneurons_policy = np.array([500,500]) # size and number of layers
         train.policy_activation_intermediate = 'relu'
 
-        # b. learning
-        train.learning_rate_policy = 1e-3  # learning rate
+        train.value_activation_intermediate = 'relu'
+        train.Nneurons_value = np.array([500,500]) # size and number of layers
+        train.N_value_NN = None # number of value networks
+
+        train.learning_rate_policy = 1e-3  # learning rate, lr_max
         train.learning_rate_policy_decay = 0.9999
-        train.learning_rate_policy_min = 1e-5
+        train.learning_rate_policy_min = 1e-5 # lr_min
+        train.learning_rate_policy_schedule = None # {t_share:fac} time share with lr = fac*lr_max + (1-fac)*lr_min
+
         train.learning_rate_value = 1e-3 # learning rate
         train.learning_rate_value_decay = 0.9999
         train.learning_rate_value_min = 1e-5
+        train.learning_rate_value_schedule = None # {t_share:fac} time share with lr = fac*lr_max + (1-fac)*lr_min
 
-        train.epoch_termination = True # terminate epochs early if no improvement
-        
-        train.Nepochs_policy = 15 # number of epochs in update
-        train.epoch_policy_min = 5 # minimum number of epochs
-        train.Delta_epoch_policy = 5 # number of epochs without improvement before termination
-        
-        train.Nepochs_value = 50 # number of epochs in update
-        train.epoch_value_min = 10 # minimum number of epochs
-        train.Delta_epoch_value = 10 # number of epochs without improvement before termination
+        train.manual_init_policy = False # whether to use manual initialization of policy NN
 
-        # c. sample and replay buffer
-        train.N = 150 # sample size
+        # b. training sample
+        train.N = 150 # sample
         train.buffer_memory = 8 # buffer_size = buffer_memory*N
         train.batch_size = train.N # batch size
 
-        train.only_initial_states_and_shocks = False # only initial states and shock (e.g. in DeepSimulate)
+        # c. replay buffer
         train.store_actions = False # store actions in replay buffer
         train.store_reward = False # store reward in replay buffer
         train.store_pd = False # store pd states in replay buffer
         train.i_t_index = False # include t index in buffer
 
-        # d. solver and exploration
-        train.terminal_actions_known = False # terminal actions are known
-        train.do_exo_actions_periods = -1 # number of periods with uniform sampling of actions
-        train.start_train_policy = -1 # start training policy after this number of iterations
-
-        train.K_time = 60 # maximum time in minutes
-        train.K = np.inf # number of iterations
-        train.sim_R_freq = 10 # frequency of simulation of lifetime reward
-        train.convergence_plot = False # plot convergence, else txt-file is written
-
-        train.K_time_min = np.inf # minimum time in minutes
-        train.transfer_grid = np.arange(-10*1e-4,0+1e-4,1e-4) # transfer grid
-        train.Delta_transfer = 1e-4 # size of transfer for convergence
-        train.Delta_time = 20 # time without improvement before termination
-
+        # d. exploration
         train.epsilon_sigma = None # std of exploration shocks
         train.epsilon_sigma_decay = 1.0 # decay of epsilon_sigma
         train.epsilon_sigma_min = None # minimum epsilon_sigma
+        train.explore_frac = torch.zeros(par.T,dtype=train.dtype,device=train.device) # fraction of agents that explore in DeepSimulate
+
+        # e. quadrature or monte carlo
+        train.use_quad = True # whether to use quadrature or monte carlo for numerical integration (for DeepFOC and DeepVPD)
+        train.redraw_mc = False # draw new mc shocks between iterations (when drawing new training sample)
+        train.update_numint_weights = False # whether to update numerical integration weights with states_pd input        
+
+        # f. smoothing
+        train.start_train_policy = -1 # start training policy after this number of iterations
+        train.tau = 0.2 # fixed tau / starting tau value
+        train.tau_final = 1.0 # final tau value
+        train.tau_schedule = None # {t_share:fac} time share with tau = (1-fac)*tau + fac*tau_final
+        train.use_target_policy = True # use target in update policy
+        train.use_target_value = True # use target in update value
+        train.target_value_in_policy = False # use target value in policy
+        
+        # g. termination of iterations
+        train.K = np.inf # number of iterations
+        train.K_time = 60 # maximum time in minutes
+        train.sim_R_freq = 10 # frequency of simulation of lifetime reward
+
+        train.convergence_plot = False # plot convergence, else txt-file is written
+        train.transfer_grid = np.arange(-10*1e-4,0+1e-4,1e-4) # transfer grid
+        train.Delta_transfer = 1e-4 # size of transfer for convergence
+        train.Delta_time = 20 # time without improvement before termination
+        train.K_time_min = np.inf # minimum time in minutes
 
         train.terminate_on_policy_loss = False # terminate if policy loss is below tolerance
         train.tol_policy_loss = 1e-4 # tolerance for policy loss
-        
-        # e. misc
-        train.clip_grad_value = 100.0 # clip value
+        train.track_sim_policy_loss = False # track policy loss on sim (expensive)
+        train.N_sample_policy_loss = None # how many samples batches when computing policy_loss on sim
+
+        # h. termination of epochs
+        train.epoch_termination = True # terminate epochs early if no improvement
+        train.Nepochs_policy = 15 # number of epochs in update
+        train.Delta_epoch_policy = 5 # number of epochs without improvement before termination
+        train.epoch_policy_min = 5 # minimum number of epochs
+        train.Nepochs_value = 50 # number of epochs in update
+        train.Delta_epoch_value = 10 # number of epochs without improvement before termination
+        train.epoch_value_min = 10 # minimum number of epochs
+
+        # i. clipping gradient
         train.clip_grad_policy = 100.0 # clip policy
-        train.use_input_scaling = False # use input scaling
-        train.N_sample_policy_loss = 100 # how many samples batches when computing policy_loss on sim
+        train.clip_grad_value = 100.0 # clip value
+
+        # j. backward algorithm
+        train.backward = False # whether to use backward algorithm
+        train.use_simult_in_backward = True # use simultaneous NN when training backward NN
+        train.NN_init_std = 0.001 # std for low variance initialization of NN
+
+        train.Nneurons_policy_t = None # number of neurons in policy NN at each time t
+        train.learning_rate_policy_t = None # learning rate for policy NN at each time t
+        train.learning_rate_policy_decay_t = None # learning rate decay for policy NN at each time t
+        train.Nepochs_policy_t = None # number of epochs for policy NN at each time t
+
+        train.Nneurons_value_t = None # number of neurons in value NN at each time t
+        train.learning_rate_value_t = None # learning rate for value NN at each time t
+        train.learning_rate_value_decay_t = None # learning rate decay for value NN at each time t
+        train.Nepochs_value_t = None # number of epochs for value NN at each time t
+
+        # k. using FOC (for DeepVPD and DeepVPDDC)
+        train.use_FOC = False # use FOC in evaluation of policy
+        train.NFOC_targets = 1 # number of FOC targets
+        train.value_weight_val = 1.0 # weight on value loss	
+        train.FOC_weight_val = 1.0 # weight on FOC loss
+        train.value_weight_pol = 1.0 # weight on value loss	
+        train.FOC_weight_pol = 1.0 # weight on FOC loss
+
+        # l. time and transformations
+        train.time_input_type = 'one_hot' # time as par.T dummies
+        train.Ninputs_time = par.T # number of time inputs
+        train.input_transformation = False # whether to use input transformation
+        train.Ninputs_aux = 0 # number of auxiliary inputs
+          
+        # m. misc.
+        train.terminal_actions_known = False # terminal actions are known
+        train.NN_use_best = True # use best NN 
+        train.epoch_use_best = True # use best epoch
+        train.only_initial_states_and_shocks = False # only initial states and shock (e.g. in DeepSimulate)
+        train.allow_synchronize = False # allow syncronize
+        train.N_target_batches = 1 # number of batches when computing target
+        train.do_sim_eps = False # simulate with exploration
 
         if torch.cuda.is_available():
             train.Ngpus = torch.cuda.device_count() # number of GPUs
         else:
             train.Ngpus = 0
-
+        
+        # n. other
         train.k = -1 # initialization
-        train.allow_synchronize = False # allow syncronize
-        train.do_sim_eps = False # simulate with exploration
 
-    def _get_quad(self):
+    def _numerical_integration(self):
         """ get quadrature points and weights """
 
+        par = self.par
         train = self.train
         dtype = train.dtype
         device = train.device
 
-        quad,quad_w = self.quad() # shape = (Nquad,Nshocks), shape = (Nquad,)
+        nodes,weigths = self.numerical_integration()
 
-        train.Nquad = quad.shape[0]
-        assert quad.shape[0] == quad_w.shape[0], 'quad and quad_w must have same length'
-        assert quad.shape[1] == self.par.Nshocks, 'quad must have same length as Nshocks'
-        assert torch.isclose(torch.sum(quad_w),torch.tensor(1.0,device=quad_w.device,dtype=quad_w.dtype)), 'quad_w must sum to 1.0'
+        # a. quadrature
+        if train.use_quad:
 
-        train.quad = quad.to(dtype).to(device)
-        train.quad_w = quad_w.to(dtype).to(device)
+            assert nodes.ndim == 2, 'nodes must be 2-dimensional'
+            assert weigths.ndim == 1, 'weights must be 1-dimensional'
+
+            train.Nnumint = nodes.shape[0]
+            assert nodes.shape[0] == weigths.shape[0], 'nodes and weigths must have same length'
+            assert nodes.shape[1] == self.par.Nshocks, 'nodes must have same length as Nshocks'
+            
+            if not train.update_numint_weights:
+                assert torch.isclose(torch.sum(weigths),torch.tensor(1.0,device=weigths.device,dtype=weigths.dtype)), 'weigths must sum to 1.0'
+
+        else: # for mc
+
+            assert nodes.ndim == 4, 'nodes must be 2-dimensional'
+            assert weigths.ndim == 1, 'weights must be 1-dimensional'
+
+            train.Nnumint = nodes.shape[2]
+            assert nodes.shape[2] == weigths.shape[0], 'mc draws and mc weights must have same length'
+
+            assert nodes.shape[0] == self.par.T-1, 'mc draws must have same length as T-1'
+            assert nodes.shape[1] == self.train.N, 'mc draws must have same length as N'
+            assert nodes.shape[3] == self.par.Nshocks, 'mc draws must have same length as Nshocks'
+
+            assert torch.isclose(torch.sum(weigths),torch.tensor(1.0,device=weigths.device,dtype=weigths.dtype)), 'weigths must sum to 1.0'
+
+        train.numint_nodes = nodes.to(dtype).to(device)
+        train.numint_weights = weigths.to(dtype).to(device)
 
     ############
     # allocate #
@@ -431,7 +445,8 @@ class DLSolverClass():
         """ allocate algorithm variables and parameters """
 
         self.algo.create_NN(self)
-        self._create_repbuffer()
+        if not self.train.backward:
+            self._create_repbuffer()
 
     def _create_repbuffer(self):
         """ create replay buffer """
@@ -464,15 +479,66 @@ class DLSolverClass():
     ########################
 
     eval_policy = neural_nets.eval_policy
+    eval_policy_t = neural_nets.eval_policy_t
     eval_value = neural_nets.eval_value
-    eval_value_pd = neural_nets.eval_value_pd
-    eval_actionvalue = neural_nets.eval_actionvalue
+    eval_value_t = neural_nets.eval_value_t
 
+    #################
+    # evaluate mode #
+    #################
+
+    def _state_trans(self,states_pd):
+
+        train = self.train
+
+        # states_pd.shape = (T,N,Nstates_pd)
+
+        T,N = states_pd.shape[:2]
+
+        # a. add dimension for numerical integration
+        if len(states_pd.shape) == 2:
+            T,N = states_pd.shape
+            states_pd = states_pd.reshape(T,N,1).repeat((1,1,train.Nnumint))
+        else:
+            T,N,X = states_pd.shape
+            states_pd = states_pd.reshape(T,N,1,X).repeat((1,1,train.Nnumint,1))
+            
+        # b. add dimension T and N dimensions in quadrature
+        if train.use_quad:
+            shocks = train.numint_nodes.tile((T,N,1,1)) # (T-1,N,Nnumint,Nshocks)
+        else:
+            shocks = train.numint_nodes # (T-1,N,Nnumint,Nshocks)
+
+        states_plus = self.state_trans(states_pd,shocks,t=None) # shape = (T,N,Nnumint,Nstates)
+        
+        return states_plus
+    
+    def _state_trans_t(self,states_pd,t):
+
+        train = self.train
+
+        # states_pd.shape = (N,Nstates_pd)
+
+        N,X = states_pd.shape
+
+        # a. add dimension for numerical integration
+        states_pd = states_pd.reshape(N,1,X).repeat((1,train.Nnumint,1))
+
+        # b. add dimension T and N dimensions in quadrature
+        if train.use_quad:
+            shocks = train.numint_nodes.tile((N,1,1))# (N,Nnumint,Nshocks)
+        else:
+            shocks = train.numint_nodes # (N,Nnumint,Nshocks)
+
+        states_plus = self.state_trans(states_pd,shocks,t=t) # shape = (N,Nnumint,Nstates)
+        
+        return states_plus
+        
     ###################
     # training sample #
     ###################
 
-    def _simulate_training_sample(self,epsilon_sigma,do_exo_actions,device=None):
+    def _simulate_training_sample(self,epsilon_sigma,device=None):
         """ generate training sample"""
 
         if 'time._simulate_training_sample' in self.info: 
@@ -495,20 +561,19 @@ class DLSolverClass():
             # i. draw exploration shocks
             eps = self.draw_exploration_shocks(epsilon_sigma,train.N).to(dtype).to(device) # shape = (T,N,Nactions)
             
-            # ii. exogenous actions
-            if do_exo_actions:
-                exo_actions = self.draw_exo_actions(train.N).to(dtype).to(device) # shape = (T,N,Nactions)
-            else:
-                exo_actions = None
+            # ii. simulate
+            simulate(self,train,eps=eps)
 
-            # iii. simulate
-            simulate(self,train,eps=eps,exo_actions=exo_actions)
-
-            # iv. store in buffer
-            self.rep_buffer.add(train)	
+            # iii. store in buffer
+            if not train.backward:
+                self.rep_buffer.add(train)
 
         if 'time._simulate_training_sample' in self.info: 
             self.info['time._simulate_training_sample'] += time.perf_counter() - t0	
+
+        # c. update mc-shocks between iterations
+        if train.redraw_mc:
+            self._numerical_integration()
 
     #########
     # solve #
@@ -561,7 +626,7 @@ class DLSolverClass():
 
         return Rs
     
-    def _update_best(self):
+    def _update_best(self,final=False):
         """ update best R and neural nets """
 
         t0 = time.perf_counter()
@@ -572,22 +637,27 @@ class DLSolverClass():
 
         best = info['best']
 
+        # a. R
         self.simulate_R()
         info[('R',train.k)] = sim.R.item()
-        # if train.algoname == 'DeepFOC': # JR: code for computing policy loss on sim
-        #     states = sim.states
-        #     if train.terminal_actions_known:
-        #         states = states[:-1]
-        #     policy_loss = 0.0
-        #     N_sample = round(sim.N/train.N_sample_policy_loss)
-        #     assert sim.N % train.N_sample_policy_loss == 0, 'N_sample_policy_loss must divide N'
-        #     for i in range(train.N_sample_policy_loss):
-        #         states_sample = states[:,i*N_sample:(i+1)*N_sample]
-        #         with torch.no_grad():
-        #             policy_loss += self.algo.policy_loss_f(self,states_sample).item()
-        #     policy_loss /= train.N_sample_policy_loss
-        #     info[('policy_loss_sim',train.k)] = policy_loss
+        if hasattr(self,'compute_model_moments'): self.compute_model_moments()
+
+        # b. policy loss
+        if train.algoname == 'DeepFOC' and train.track_sim_policy_loss:
+            states = sim.states
+            if train.terminal_actions_known:
+                states = states[:-1]
+            policy_loss = 0.0
+            N_sample = round(sim.N/train.N_sample_policy_loss)
+            assert sim.N % train.N_sample_policy_loss == 0, 'N_sample_policy_loss must divide N'
+            for i in range(train.N_sample_policy_loss):
+                states_sample = states[:,i*N_sample:(i+1)*N_sample]
+                with torch.no_grad():
+                    policy_loss += self.algo.policy_loss_f(self,states_sample).item()
+            policy_loss /= train.N_sample_policy_loss
+            info[('policy_loss_sim',train.k)] = policy_loss
         
+        # b. transfer if best
         if sim.R.item() > best.R: 
 
             best.k = train.k
@@ -596,10 +666,11 @@ class DLSolverClass():
             
             best.policy_NN = deepcopy(self.policy_NN.state_dict())
             best.value_NN = deepcopy(self.value_NN.state_dict()) if not self.value_NN is None else None
+            if not self.train.N_value_NN is None:
+                best.value_NNs = [deepcopy(self.value_NNs[i].state_dict()) for i in range(self.train.N_value_NN)]
 
             # compute transfer
             if hasattr(self,'add_transfer'):
-
 
                 sim_base = sim
 
@@ -630,11 +701,27 @@ class DLSolverClass():
         policy_epochs = info[('policy_epochs',k)]
 
         R = info[('R',k)]
-        print(f'{k = :5d} of {train.K-1}: sim.R = {R:12.8f} [best: {best.R:12.8f}] [{time_k:.1f} secs] [{value_epochs = :3d}] [{policy_epochs = :3d}] [{time_tot:6.2f} mins]',end='')
+        print(f'{k = :5d} of {train.K-1}: sim.R = {R:14.8f} [best: {best.R:14.8f}] [{time_k:.1f} secs] [{value_epochs = :3d}] [{policy_epochs = :3d}] [{time_tot:6.2f} mins]',end='')
         
         if train.terminate_on_policy_loss and k >= train.start_train_policy: 
             policy_loss = info[('policy_loss',k)]
             print(f' [{policy_loss = :.8f}]',end='')
+
+        policy_lr = self.policy_opt.param_groups[-1]['lr'] # assuming no differential learning rates
+        print (f' [{policy_lr = :.1e}]',end='')
+
+        if hasattr(self,'value_opt') or not self.train.N_value_NN is None:
+            if self.train.N_value_NN is None:
+                value_lr = self.value_opt.param_groups[-1]['lr'] # assuming no differential learning rates
+                print (f' [{value_lr = :.1e}]',end='')
+            else:
+                value_lrs = [self.value_opts[j].param_groups[-1]['lr'] for j in range(self.train.N_value_NN)]
+                value_lr = sum(value_lrs)/self.train.N_value_NN
+                print (f' [{value_lr = :.1e}]',end='')
+        
+        if not train.tau_schedule is None:
+            tau = info[('tau',k)]
+            print (f' [{tau = :.2f}]',end='')
 
         if not np.isnan(R):
             if best.k == k:
@@ -644,10 +731,8 @@ class DLSolverClass():
         else:
             print('')
 
-    def solve(self,do_print=False,do_print_all=False,show_memory=False,postfix=''):
-        """ solve model """
-
-        if not torch.cuda.is_available(): show_memory = False
+    def solve(self,do_print=False,do_print_all=False,do_print_terminate=True,model_simult=None,postfix=''):
+        """ solve model """ 
 
         timestamp = solving_json(postfix)
         t0_solve = time.perf_counter()
@@ -659,11 +744,8 @@ class DLSolverClass():
         sim = self.sim
         train = self.train
         info = self.info
+        info['t0_solve'] = t0_solve
         
-        if show_memory: 
-            free_GB_ini = get_free_memory(train.device)
-            print(f'initial: {free_GB_ini:.2f}GB free')
-
         if 'solve_in_progress' in self.info:
             continued_solve = True
         else:
@@ -681,7 +763,12 @@ class DLSolverClass():
             self.info['time._simulate_training_sample'] = 0.0
             self.info['time.simulate_R'] = 0.0
 
-        # b. initialize best
+        # b. backwars
+        if train.backward:
+            self._solve_backward(do_print=do_print,model_simult=model_simult)
+            return
+        
+        # c. initialize best
         if not continued_solve:
 
             best = info['best'] = SimpleNamespace()
@@ -690,6 +777,7 @@ class DLSolverClass():
             best.R = -np.inf
             best.policy_NN = None
             best.value_NN = None
+            best.value_NNs = None
 
         else:
 
@@ -698,27 +786,26 @@ class DLSolverClass():
         # c. loop over iterations
         if not continued_solve:
             epsilon_sigma = info['epsilon_sigma'] = deepcopy(train.epsilon_sigma)
-            k = 0
+            train.k = info['iter'] = 0
         else:
             epsilon_sigma = info['epsilon_sigma']
-            k = info['iter']
+            train.k = info['iter']
 
         while True:
             
             t0_k = time.perf_counter()
-            train.k = k
+            k = train.k
 
             info[('value_epochs',k)] = 0 # keep track of number of value epochs (updated in algo)
             info[('policy_epochs',k)] = 0 # keep track of number of policy epochs (updated in algo)
 
             # i. simulate training sample
-            do_exo_actions = k < train.do_exo_actions_periods # exo actions defined in draw_exo_actions
-            self._simulate_training_sample(epsilon_sigma,do_exo_actions)
+            self._simulate_training_sample(epsilon_sigma)
             
             # update exploration
             if epsilon_sigma is not None:
                 epsilon_sigma *= train.epsilon_sigma_decay
-                epsilon_sigma = np.fmax(epsilon_sigma,train.epsilon_sigma_min)
+                epsilon_sigma = torch.fmax(epsilon_sigma,train.epsilon_sigma_min)
 
             # ii. update neural nets
             t0 = time.perf_counter()
@@ -727,7 +814,7 @@ class DLSolverClass():
 
             # iii. scheduler step
             t0 = time.perf_counter()
-            self.algo.scheduler_step(self)
+            self.algo.scheduler_step(self) # is different for each algorithm      
             info['time.scheduler'] += time.perf_counter() - t0
 
             # iv. print and termination
@@ -756,70 +843,87 @@ class DLSolverClass():
                 info[('R',k)] = np.nan		
                 if do_print_all: self._print_progress(t0_k,t0_solve)
             
-            # v. termination from policy loss
-            if k > train.start_train_policy:
+            info['iter'] = k + 1
+            
+            ###############
+            # termination #
+            ###############
+
+            # v. policy loss
+            if k >= train.start_train_policy:
                 if train.terminate_on_policy_loss and info[('policy_loss',k)] < train.tol_policy_loss:
-                    self._update_best() # final update
+                    self._update_best(final=True) # final update
                     k += 1
-                    print(f'Terminating after {k} iter, policy loss lower than tolerance')
+                    if do_print_terminate: print(f'Terminating after {k} episodes, policy loss lower than tolerance')
                     break
                 
-            # vi. termination from time
+            # vi. time
             time_tot = (time.perf_counter()-t0_solve)/60 + info['time']/60
             if time_tot > train.K_time:
-                self._update_best() # final update
+                self._update_best(final=True) # final update
                 k += 1
-                print(f'Terminating after {k} iter, max time {train.K_time} mins reached')
+                if do_print_terminate: print(f'Terminating after {k} episodes, max time {train.K_time} mins reached')
                 break
                 
-            # vii. check if solving.json has been updated for manual termination
-            manuel_terminate = check_solving_json(timestamp)
-            if manuel_terminate:
-                self._update_best() # final update
+            # vii. manual
+            manual_termination = check_solving_json(timestamp)
+            if manual_termination:
+                self._update_best(final=True) # final update
                 k += 1
-                print(f'Terminating after {k} iter, manuel termination')
+                if do_print_terminate: print(f'Terminating after {k} episodes, manual termination')
                 break
 
-            # vii. terminate from too many iterations
-            k += 1
-            if k >= train.K: 
-                self._update_best() # final update
-                print(f'Terminating after {k} iter, max number of iterations reached')
+            # vii. episodes
+            if train.k+1 >= train.K: 
+                self._update_best(final=True) # final update
+                if do_print_terminate: print(f'Terminating after {train.k+1} episodes, max number of episodes reached')
                 break            
 
-        # d. load best solution
+            train.k += 1
+
+        # e. load best solution
         t0 = time.perf_counter()
 
-        if self.policy_NN is not None: 
-            if not best.policy_NN is None:
-                self.policy_NN.load_state_dict(best.policy_NN)
-        
-        if self.value_NN is not None: 
-            if not best.value_NN is None:
-                self.value_NN.load_state_dict(best.value_NN)
+        if train.NN_use_best:
+
+            if self.policy_NN is not None: 
+                if not best.policy_NN is None:
+                    self.policy_NN.load_state_dict(best.policy_NN)
+            
+            if self.value_NN is not None: 
+                if not best.value_NN is None:
+                    self.value_NN.load_state_dict(best.value_NN)
+
+            if self.train.N_value_NN is not None:
+                if not best.value_NNs is None:
+                    for i in range(self.train.N_value_NN):
+                        self.value_NNs[i].load_state_dict(best.value_NNs[i])
                     
         info['time.update_best'] += time.perf_counter() - t0
 
-        # e. final simulation
+        # f. final simulation
         t0 = time.perf_counter()
         self.simulate_R()
         info['time.update_best'] += time.perf_counter() - t0
 
-        # f. store
-        info['R'] = best.R
+        # g. store
+        info['R'] = sim.R.item() # best.R if train.NN_use_best else info[('R',train.k)]
+        info['best_R'] = best.R
+    
         info['time'] += time.perf_counter()-t0_solve
-        info['iter'] = k
+        info[('value_epochs','sum')] = np.sum([info[('value_epochs',k)] for k in range(info['iter'])])
+        info[('policy_epochs','sum')] = np.sum([info[('policy_epochs',k)] for k in range(info['iter'])])
         info[('value_epochs','mean')] = np.mean([info[('value_epochs',k)] for k in range(info['iter'])])
         info[('policy_epochs','mean')] = np.mean([info[('policy_epochs',k)] for k in range(info['iter'])])
 
         if do_print: self.show_info()
 
-        # g. extra: multiples simulations of R
+        # h. extra: multiples simulations of R
         if do_print and self.sim.reps > 0: print('Simulating multiple Rs')
         Rs = self.simulate_Rs()
         info['Rs'] = Rs
     
-        # h. extra: simulation with epsilon shocks
+        # i. extra: simulation with epsilon shocks
         if train.do_sim_eps and not epsilon_sigma is None:
 
             if do_print: print('Simulating with exploration')
@@ -832,17 +936,42 @@ class DLSolverClass():
 
             self.sim_eps = None
         
-        # h. empty cache
-        if show_memory: 
-            free_GB_fin = get_free_memory(train.device)
-            print(f'solve(): {free_GB_ini-free_GB_fin:.2f}GB allocated')
-
+        # j. empty cache
         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-        if show_memory:
-            free_GB_after = get_free_memory(train.device)
-            print(f'empty_cache(): {free_GB_fin-free_GB_after:.2f}GB deallocated')
-            print(f'final: {free_GB_after:.2f}GB free')
+    def set_time_per_t(self,value=False):
+
+        train = self.train
+        info = self.info
+
+        time_left = 60*train.K_time-info['time']
+        T = self.par.T-1 if train.terminal_actions_known else self.par.T
+        if value: T *= 2
+        info['time_per_t'] = time_left / T
+
+    def _solve_backward(self,do_print=False,model_simult=None):
+        """ solve backward """
+
+        train = self.train
+        info = self.info
+
+        if self.train.use_simult_in_backward and model_simult is None:
+            raise ValueError('model_simult must be provided when use_simult_in_backward = True')
+
+        # a. solve
+        self.algo.solve_backward(self,do_print=do_print,model_simult=model_simult)
+
+        # b. simulate
+        self.simulate_R()
+        info['R'] = self.sim.R.item()
+        self.simulate_Rs()
+
+        # hc extra: multiples simulations of R
+        if do_print and self.sim.reps > 0: print('Simulating multiple Rs')
+        Rs = self.simulate_Rs()
+        info['Rs'] = Rs
+
+        info['time'] += time.perf_counter()-info['t0_solve']    
 
     def show_info(self):
         
@@ -851,192 +980,16 @@ class DLSolverClass():
         policy_epochs = self.info[('policy_epochs','mean')]
         value_epochs = self.info[('value_epochs','mean')]
         time_tot = self.info['time']
-
+    
         print(f'{R = :.4f}, time = {time_tot/60:.1f} mins, iter = {iter}, policy epochs = {policy_epochs:.2f}, value epochs = {value_epochs:.2f}')
 
-    def time_solve(self,Nstats=0):
-        """ Time the solve function """
-
-        # a. turn on synchronization
-        train = self.train
-        train.allow_synchronize = True
-
-        # b. profile
-        pr = cProfile.Profile()
-        pr.enable()
-
-        t0 = time.perf_counter()
-        self.solve(do_print=False)
-        t1 = time.perf_counter()
-        time_solve = t1-t0
-
-        pr.disable()
-
-        if Nstats > 0:
-            
-            print('')
-
-            (
-                        pstats.Stats(pr)
-                        .strip_dirs()
-                        .sort_stats(pstats.SortKey.CUMULATIVE)
-                        .print_stats(Nstats)
-            )
-
-        print('')
-
-        # c. gather stats
-        stats = pstats.Stats(pr)		
-
-        def get_all_keys(d):
-            for key, value in d.items():
-                yield key
-                if isinstance(value,dict):
-                    yield from get_all_keys(value)
-
-        def get_all_keys_in_levels(d,i=0,base=None):
-            if base is None: base = ()
-            for key, value in d.items():
-                yield (i,base,key)
-                if isinstance(value, dict):
-                    if len(base) > 0:
-                        yield from get_all_keys_in_levels(value,i+1,(*base,key))
-                    else:
-                        yield from get_all_keys_in_levels(value,i+1,(key,))
-
-        if self.train.algoname == 'DeepSimulate':
-            funcs_dict = {
-                '_simulate_training_sample':None,
-                'simulate_R':None,
-                'update_NN':{
-                    'policy_loss_f':None,
-                    'NN_step':None
-                    }
-            }
-        elif self.train.algoname == 'DeepFOC':
-            funcs_dict = {
-                '_simulate_training_sample':None,
-                'simulate_R':None,
-                'update_NN':{
-                    'train_policy':{
-                        'policy_loss_f':None,
-                        'NN_step_policy':None
-                        }  
-                    }
-            }
-        elif self.train.algoname == 'DeepVPD':
-            funcs_dict = {
-                '_simulate_training_sample':None,
-                'simulate_R':None,
-                'update_NN':{
-                    'train_value':{
-                        'compute_target':None,
-                        'value_loss_f':None,
-                        'NN_step_value':None
-                        },
-                    'train_policy':{
-                        'policy_loss_f':None,
-                        'NN_step_policy':None
-                        }  
-                }
-            }
-        elif self.train.algoname == 'DeepQ':
-            funcs_dict = {
-                '_simulate_training_sample':None,
-                'simulate_R':None,
-                'update_NN':{
-                    'train_value':{
-                        'NN_step_value':None
-                        },
-                    'train_policy':{
-                        'NN_step_policy':None
-                        }  
-                }
-            }
-        else:
-            raise NotImplementedError(f"Algo {self.train.algoname} not implemented")
-        
-        func_names = list(get_all_keys(funcs_dict))
-
-        self.info_timing = {}
-        for func_info, func_stats in stats.stats.items():
-            _, _, function_name = func_info # this assumes no duplicate function names across modules
-            if function_name in func_names:
-                self.info_timing[function_name] = func_stats
-
-        # d. print
-        print(f'Total time: {time_solve:.1f} secs')
-        for f in get_all_keys_in_levels(funcs_dict):
-            
-            lvl = f[0]
-            if lvl == 0:
-                supname = 'total'
-                suptime = time_solve
-            else:
-                supname = f[1][-1]
-                suptime = self.info_timing[supname][3]
-            
-            name = f[2]
-            _name = '  '*f[0] + name
-            nowtime = self.info_timing[name][3]
-            
-            print(f'{_name:35s} {100*nowtime/suptime:5.1f}% of {supname} [{nowtime:.1f} secs]')		
-
-        # e. turn off synchronization		
-        train.allow_synchronize = False
-
+    time_solve = timings.time_solve
+    
     #############
     # save-load #
     #############
 
-
-    def save(self,filename):
-        """ save model """
-
-        save_dict = {}
-
-        # a. par, sim and train
-        nss = ['par','sim','train','sim_eps']
-        
-        for ns in nss:
-            if hasattr(self,ns) and not self.__dict__[ns] is None:
-
-                save_dict[ns] = SimpleNamespace()
-                for k,v in self.__dict__[ns].__dict__.items():
-                    
-                    if k in ['device']: continue
-                    if ns == 'sim_eps' and not k in ['states']: continue
-                    
-                    if isinstance(v,torch.Tensor): 
-                    
-                        if ns == 'train': continue
-                        save_dict[ns].__dict__[k] = v.cpu().numpy()
-                    
-                    else: 
-                    
-                        save_dict[ns].__dict__[k] = v
-        
-        # b. info
-        save_dict['info'] = self.info
-        for k, v in save_dict['info']['best'].policy_NN.items():
-            save_dict['info']['best'].policy_NN[k] = v.cpu()
-        if hasattr(self,'info_timing'): save_dict['info_timing'] = self.info_timing
-        if not self.value_NN is None:
-            for k, v in save_dict['info']['best'].value_NN.items():
-                save_dict['info']['best'].value_NN[k] = v.cpu()
-
-
-        # c. networks
-        save_dict['policy_NN'] = deepcopy(self.policy_NN).to('cpu').state_dict()
-        if not self.value_NN is None:
-            save_dict['value_NN'] = deepcopy(self.value_NN).to('cpu').state_dict()
-        
-        save_dict['torch_rng_state'] = self.torch_rng_state
-        save_dict['torch_rng_state_final'] = torch.get_rng_state()
-
-        # d. save
-        with open(f'{filename}', 'wb') as f:
-            pickle.dump(save_dict, f)
+    save = save_load.save
 
     #########################
     # solve - multiple GPUs #

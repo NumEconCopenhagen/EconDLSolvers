@@ -29,6 +29,9 @@ def solve_DDP(model,do_print=False,do_print_all=False,port=None):
 		print('Epoch termination is not implemented in DDP, setting to False')
 		train.epoch_termination = False
 	
+	if train.epoch_use_best:
+		print('Using best epoch is not implemented in DDP, setting to False')
+		train.epoch_use_best = False
 
 	if train.terminate_on_policy_loss:
 		print('Terminate on policy loss is not implemented in DDP, setting to False')
@@ -40,9 +43,9 @@ def solve_DDP(model,do_print=False,do_print_all=False,port=None):
 		nprocs=train.Ngpus,join=True)
 
 	# d. pickle load info
-	info = pickle.load(open(f'info_pickle.pkl', 'rb'))
+	info = pickle.load(open(f'info_pickle.pt', 'rb'))
 	model.info = info
-	os.remove('info_pickle.pkl')
+	os.remove('info_pickle.pt')
 
 	# e. final simulation
 	model.simulate_R()
@@ -115,10 +118,8 @@ def _solve_DDP_process(model,rank,t0_solve,port=None,do_print=False,do_print_all
 			info[('policy_epochs',k)] = 0			
 
 		# i. create training sample
-		do_exo_actions = False # k < train.do_exo_actions_periods
-
 		if rank == 0:
-			model._simulate_training_sample(epsilon_sigma,do_exo_actions)
+			model._simulate_training_sample(epsilon_sigma)
 
 		torch.distributed.barrier()
 
@@ -213,7 +214,7 @@ def _solve_DDP_process(model,rank,t0_solve,port=None,do_print=False,do_print_all
 		# dump info to pickle file for storing info from rank 0
 		model.info['time.loop'] = time.perf_counter() - t0_loop
 		model.info['iter'] = k+1
-		pickle.dump(model.info, open(f'info_pickle.pkl', 'wb'))
+		pickle.dump(model.info, open(f'info_pickle.pt', 'wb'))
 
 	# vii. cleanup
 	destroy_process_group()

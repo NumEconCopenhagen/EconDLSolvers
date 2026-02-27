@@ -15,20 +15,17 @@ typedef struct par_struct
  double sigma_psi;
  int Nxi;
  int Npsi;
+ int Nmc;
  double R;
  int D;
- double tau;
+ double nu;
  bool nonnegative_investment;
  bool KKT;
- double m_scaler;
- double p_scaler;
- double n_scaler;
+ bool use_softmax;
  double mu_m0;
  double sigma_m0;
  double mu_p0;
  double sigma_p0;
- double mu_n0;
- double sigma_d0;
  double Delta_MPC;
  int NDC;
  double* kappa;
@@ -56,6 +53,7 @@ bool get_bool_par_struct(par_struct* x, char* name){
  if( strcmp(name,"full") == 0 ){ return x->full; }
  else if( strcmp(name,"nonnegative_investment") == 0 ){ return x->nonnegative_investment; }
  else if( strcmp(name,"KKT") == 0 ){ return x->KKT; }
+ else if( strcmp(name,"use_softmax") == 0 ){ return x->use_softmax; }
  else {return false;}
 
 }
@@ -68,6 +66,7 @@ int get_int_par_struct(par_struct* x, char* name){
  else if( strcmp(name,"T_retired") == 0 ){ return x->T_retired; }
  else if( strcmp(name,"Nxi") == 0 ){ return x->Nxi; }
  else if( strcmp(name,"Npsi") == 0 ){ return x->Npsi; }
+ else if( strcmp(name,"Nmc") == 0 ){ return x->Nmc; }
  else if( strcmp(name,"D") == 0 ){ return x->D; }
  else if( strcmp(name,"NDC") == 0 ){ return x->NDC; }
  else if( strcmp(name,"Nstates_fixed") == 0 ){ return x->Nstates_fixed; }
@@ -97,16 +96,11 @@ double get_double_par_struct(par_struct* x, char* name){
  else if( strcmp(name,"sigma_xi") == 0 ){ return x->sigma_xi; }
  else if( strcmp(name,"sigma_psi") == 0 ){ return x->sigma_psi; }
  else if( strcmp(name,"R") == 0 ){ return x->R; }
- else if( strcmp(name,"tau") == 0 ){ return x->tau; }
- else if( strcmp(name,"m_scaler") == 0 ){ return x->m_scaler; }
- else if( strcmp(name,"p_scaler") == 0 ){ return x->p_scaler; }
- else if( strcmp(name,"n_scaler") == 0 ){ return x->n_scaler; }
+ else if( strcmp(name,"nu") == 0 ){ return x->nu; }
  else if( strcmp(name,"mu_m0") == 0 ){ return x->mu_m0; }
  else if( strcmp(name,"sigma_m0") == 0 ){ return x->sigma_m0; }
  else if( strcmp(name,"mu_p0") == 0 ){ return x->mu_p0; }
  else if( strcmp(name,"sigma_p0") == 0 ){ return x->sigma_p0; }
- else if( strcmp(name,"mu_n0") == 0 ){ return x->mu_n0; }
- else if( strcmp(name,"sigma_d0") == 0 ){ return x->sigma_d0; }
  else if( strcmp(name,"Delta_MPC") == 0 ){ return x->Delta_MPC; }
  else {return NAN;}
 

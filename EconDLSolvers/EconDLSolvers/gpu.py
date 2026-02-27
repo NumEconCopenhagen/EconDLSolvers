@@ -17,7 +17,7 @@ def choose_gpu():
 
     if not torch.cuda.is_available():
         print(f'No GPU available, using CPU')
-        return 'cpu'
+        return 'cpu', None
     
     pynvml.nvmlInit()
 
@@ -27,8 +27,9 @@ def choose_gpu():
     for cuda_id in range(ngpus):
         
         handle = pynvml.nvmlDeviceGetHandleByIndex(cuda_id)
-        info = pynvml.nvmlDeviceGetMemoryInfo(handle)        
-        print(f'GPU {cuda_id}: {info.free/1024**3:.2f}GB free')
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle) 
+        name = pynvml.nvmlDeviceGetName(handle)
+        print(f'GPU {cuda_id}: {info.free/1024**3:.2f}GB free [{name}]')
         
         if info.free > mem_best:
             cuda_id_best = cuda_id
@@ -37,4 +38,4 @@ def choose_gpu():
     pynvml.nvmlShutdown()
     print(f'Best GPU: {cuda_id_best}')
 
-    return f'cuda:{cuda_id_best}' if torch.cuda.is_available() else 'cpu'
+    return f'cuda:{cuda_id_best}', name

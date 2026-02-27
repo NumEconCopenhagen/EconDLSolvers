@@ -46,14 +46,14 @@ double get_d_and_mbar(double m, double* n, double* choices, double* d, par_struc
         double dj_low = par->nonnegative_investment ? n[j] : 0.0;
 
         // b. maximum (upper bound enforced)
-        double dj_high = MIN(n[j] + budget::d_consume_all(par->tau,0.0,mbar),egm->n_max);
+        double dj_high = MIN(n[j] + budget::d_consume_all(par->nu,0.0,mbar),egm->n_max);
 
         // c. choice
 		d[j] = dj_low+(dj_high-dj_low)*choices[j];
 
         // d. update mbar
         double Delta_dj = d[j] - n[j];
-		mbar = mbar - Delta_dj - budget::adj_cost(Delta_dj,par->tau);
+		mbar = mbar - Delta_dj - budget::adj_cost(Delta_dj,par->nu);
 
     }
 

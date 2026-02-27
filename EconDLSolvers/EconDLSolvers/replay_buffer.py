@@ -3,8 +3,6 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-
-
 class ReplayBuffer():
 	""" Buffer to store observations."""
 

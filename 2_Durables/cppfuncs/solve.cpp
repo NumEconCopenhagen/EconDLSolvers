@@ -42,3 +42,6 @@ EXPORT void solve_all(par_struct* par, egm_struct* egm){
     } // t
     
 } // solve
+
+
+

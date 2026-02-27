@@ -1,10 +1,13 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE' # without this python may crash when plotting from matplotlib
+os.environ['MKL_THREADING_LAYER'] = 'GNU'
 import numpy as np
 import torch
 torch.set_warn_always(True)
 from copy import deepcopy
+
 from consav.quadrature import log_normal_gauss_hermite
+from consav.grids import nonlinspace
 
 from EconDLSolvers import DLSolverClass
 
@@ -17,33 +20,14 @@ def torch_uniform(a,b,size):
 
     return a + (b-a)*torch.rand(size)
 
-def get_omega_delta_d_ubar(D):
-    """ Get omega, delta, and d_ubar for a given number of durables """
+def get_omega_delta_d_ubar(D,scale=0.6,omega_base=0.2):
+    """ get omega, delta, and d_ubar for a given number of durables """
 
-    omega = torch.tensor([0.2/D for i in range(D)])
-
-    if D == 1:
-        delta = torch.tensor([0.2])
-    elif D == 2:
-        delta = torch.tensor(sorted([0.15, 0.2]))
-    elif D == 3:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1]))
-    elif D == 4:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1, 0.25]))
-    elif D == 5:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1, 0.25, 0.3]))
-    elif D == 6:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1, 0.25, 0.3, 0.27]))
-    elif D == 7:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1, 0.25, 0.3, 0.27, 0.22]))
-    elif D == 8:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1, 0.25, 0.3, 0.27, 0.22, 0.19]))
-    elif D == 9:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1, 0.25, 0.3, 0.27, 0.22, 0.19, 0.17]))
-    elif D == 10:
-        delta = torch.tensor(sorted([0.15, 0.2, 0.1, 0.25, 0.3, 0.27, 0.22, 0.19, 0.17, 0.16]))
+    omega = torch.tensor([np.exp(-scale*i) for i in range(D)]) # omega is the initial stock of durables
+    omega = omega / torch.sum(omega) * omega_base # scale to base value
     
-    d_ubar = torch.tensor([0.01 for i in range(D)])
+    delta = torch.tensor([0.10 for i in range(D)])
+    d_ubar = torch.tensor([0.001 for i in range(D)])
 
     return omega, delta, d_ubar
 
@@ -78,11 +62,12 @@ class DurablesModelClass(DLSolverClass):
         par.kappa_growth_decay = 0.1 # income growth decay
 
         par.rho_p = 0.95  # shock, persistence
-        par.sigma_xi = 0.1 # shock, std
-        par.sigma_psi = 0.1 # shock, std
+        par.sigma_xi = 0.10 # shock, std
+        par.sigma_psi = 0.10 # shock, std
 
         par.Nxi = 4 # shock, number of qudrature nodes, permanent
         par.Npsi = 4 # shock, number of qudrature nodes, transitory
+        par.Nmc = 100 # number of Monte Carlo draws
 
         # saving and durables
         par.R = 1.01 # gross return
@@ -92,10 +77,7 @@ class DurablesModelClass(DLSolverClass):
 
         # b. misc
         par.KKT = False # use KKT conditions (multipliers must be included in policy_NN)
-
-        par.m_scaler = 1 / 10.0
-        par.p_scaler = 1 / 5.0
-        par.n_scaler = 1 / 1.0
+        par.use_softmax = False # use softmax to enforce constraints
 
         # c. simulation
 
@@ -104,8 +86,6 @@ class DurablesModelClass(DLSolverClass):
         par.sigma_m0 = 0.1 # initial cash-on-hand, std
         par.mu_p0 = 1.0 # initial permanent income, mean
         par.sigma_p0 = 0.1 # initial permanent income, std
-        par.mu_n0 = 0.1 # initial durable, mean
-        par.sigma_d0 = 0.1 # initial durable, std
 
         # life-time reward
         sim.N = 100_000 # number of agents
@@ -157,10 +137,12 @@ class DurablesModelClass(DLSolverClass):
         par.Nstates_pd = par.Nstates_dynamic_pd + par.Nstates_fixed_pd # number of post-decision states
 
         # number of actions and outcomes
+        actions_base = 1 + par.D
+        actions_base += 1 if par.use_softmax else 0
         if par.KKT:
-            par.Nactions = 1 + 1 * par.D + 1 + 1 * par.D
+            par.Nactions = actions_base  + (1 + par.D) # add multipliers
         else:
-            par.Nactions = 1 + 1 * par.D
+            par.Nactions = actions_base
         
         par.Noutcomes = 2 + par.D
 
@@ -188,6 +170,7 @@ class DurablesModelClass(DLSolverClass):
         sim.euler_error = torch.zeros((par.T,sim.N),dtype=dtype,device=device)
         sim.MPC_c = torch.zeros((par.T,sim.N),dtype=dtype,device=device)
         sim.MPC_d = torch.zeros((par.T,sim.N,par.D),dtype=dtype,device=device)
+        sim.MPX = torch.zeros((par.T,sim.N),dtype=dtype,device=device)
 
     #########
     # train #
@@ -203,12 +186,16 @@ class DurablesModelClass(DLSolverClass):
 
         # a. neural network
         if not par.full:
-            train.Nneurons_policy = np.array([50,50])
-            train.Nneurons_value = np.array([50,50])
+
+            train.Nneurons_policy = np.array([100,100])
+            train.Nneurons_value = np.array([100,100])
         
         # b. policy activation functions and clipping
-        train.policy_activation_final = ['sigmoid']
-        
+        if par.use_softmax:
+            train.policy_activation_final = ['softmax' for i in range(par.D+2)]
+        else:
+            train.policy_activation_final = ['sigmoid' for i in range(par.D+1)]
+
         train.min_actions = torch.tensor([0.0 for _ in range(par.Nactions)],dtype=dtype,device=device)
 
         if not par.KKT:
@@ -216,42 +203,50 @@ class DurablesModelClass(DLSolverClass):
             train.max_actions = torch.tensor([0.9999 for _ in range(par.Nactions)],dtype=dtype,device=device) # maximum action value		
         
         else:
+            
+            if par.use_softmax:
+                max_action_val_sr = torch.tensor([0.9999 for i in range(par.D+2)],dtype=dtype,device=device)
+            else:
+                max_action_val_sr = torch.tensor([0.9999 for i in range(par.D+1)],dtype=dtype,device=device)
 
-            max_action_val_sr = torch.tensor([0.9999 for i in range(par.D + 1)],dtype=dtype,device=device)
-            max_action_val_mult = torch.tensor([np.inf for i in range(par.D + 1)],dtype=dtype,device=device)
+            max_action_val_mult = torch.tensor([np.inf for i in range(par.D+1)],dtype=dtype,device=device)
             train.max_actions = torch.cat((max_action_val_sr,max_action_val_mult))
 
-            final_actvation_list_sr = ['sigmoid' for i in range(par.D+1)]
             policy_activation_final_list_mult = ['softplus' for i in range(par.D+1)]
-            train.policy_activation_final = final_actvation_list_sr + policy_activation_final_list_mult	
+            train.policy_activation_final = train.policy_activation_final + policy_activation_final_list_mult	
             
-        # c. misc
+        # c. numerical integration
+        train.use_quad = True
+
+        # d. misc
         train.terminal_actions_known = False
 
-        # b. algorithm specific
+        # e. exploration
+        train.epsilon_sigma = 0.1*torch.ones(par.Nactions,device=device)
+        if par.D == 3:
+            train.epsilon_sigma = 0.05*torch.ones(par.Nactions,device=device)
+        if par.D == 8:
+            train.epsilon_sigma = 0.03*torch.ones(par.Nactions,device=device)
+
+        train.epsilon_sigma_min = torch.zeros(par.Nactions,device=device)
+                
+        # e. algorithm specific
 
         # DeepSimulate 
-        if self.train.algoname == 'DeepSimulate':
-            pass
-        else:
-            train.epsilon_sigma = 0.1*np.ones(par.Nactions)
-            if par.D == 3:
-                train.epsilon_sigma = 0.05*np.ones(par.Nactions)
-            if par.D == 8:
-                train.epsilon_sigma = 0.03*np.ones(par.Nactions)
-
-            train.epsilon_sigma_min = np.zeros(par.Nactions)
+        train.explore_frac = torch.tensor([0.5*(1-t/(par.T-1)) for t in range(par.T)],dtype=dtype,device=device)
+		# starts with 50% and goes down to 0% at the end of the life cycle
 
         # DeepFOC
-        if self.train.algoname == 'DeepFOC':
-            train.Nneurons_policy = np.array([700,700])
-            if par.D == 8:
-                train.Nneurons_policy = np.array([1000,1000])
+        if self.train.algoname in ['DeepFOC','DeepFOCBackward']:
+            
+            if par.full:
+                train.Nneurons_policy = np.array([700,700])
 
-            train.eq_w = torch.tensor([5.0] + [3.0 for i_d in range(par.D)] + [1.0 for i in range(1+par.D)],dtype=dtype,device=device) # weight 5 on consumption euler, weight 3 on all durable eulers, weight 1 on all slackness
-            
-            
-        if self.train.algoname == 'DeepVPD':
+            if par.D == 8: train.Nneurons_policy = np.array([1000,1000])
+            train.eq_w = torch.tensor([5.0] + [3.0 for i_d in range(par.D)] + [1.0 for i in range(1+par.D)],dtype=dtype,device=device) 
+            # weight 5 on consumption euler, weight 3 on all durable eulers, weight 1 on all slackness
+
+        if self.train.algoname in ['DeepVPD','DeepVPDBackward']:
             
             if par.D < 4:
                 train.N_value_NN = 3
@@ -261,15 +256,10 @@ class DurablesModelClass(DLSolverClass):
 
             if par.D == 8:
                 train.N_value_NN = 4
-                train.epsilon_sigma = 0.06*np.ones(par.Nactions)
+                train.epsilon_sigma = 0.06*torch.ones(par.Nactions)
                 train.tau = 0.8
                 train.Nneurons_value = np.array([1000,1000])
-                
-                if train.use_FOC:
-                    train.Nneurons_policy = np.array([1000,1000])
-                    train.NFOC_targets = 1+par.D # number of targets in FOCs
-                    assert self.par.KKT == True, 'KKT must be True for FOC in Durables model'
-            
+                            
     def allocate_train(self):
         """ allocate memory training """
 
@@ -279,12 +269,13 @@ class DurablesModelClass(DLSolverClass):
         device = train.device
 
         # a. dependent settings
-        scale_vec = [par.m_scaler,par.p_scaler] + [par.n_scaler for _ in range(par.D)]
-        train.scale_vec_states = torch.tensor(scale_vec,dtype=train.dtype,device=train.device)
-        train.scale_vec_states_pd = torch.tensor(scale_vec,dtype=train.dtype,device=train.device)
-
-        if train.algoname == 'DeepFOC':
+        if not train.eq_w is None:
             train.eq_w = train.eq_w / torch.sum(train.eq_w)
+
+        if train.algoname == 'DeepVPD':
+            if train.use_FOC:
+                train.NFOC_targets = 1+par.D # number of targets in FOCs
+                assert self.par.KKT == True, 'KKT must be True for FOC in Durables model'
 
         # b. training samples
         train.states = torch.zeros((par.T,train.N,par.Nstates),dtype=dtype,device=device)
@@ -298,18 +289,33 @@ class DurablesModelClass(DLSolverClass):
     # quadrature #
     ##############
 
-    def quad(self):
+    def numerical_integration(self):
         """ quadrature nodes and weights """
 
         par = self.par
+        train = self.train
+        dtype = train.dtype
+        device = train.device
 
-        xi,psi = torch.meshgrid(par.xi,par.psi, indexing='ij')
-        xi_w,psi_w = torch.meshgrid(par.xi_w,par.psi_w, indexing='ij')
+        if train.use_quad:
+
+            xi,psi = torch.meshgrid(par.xi,par.psi, indexing='ij')
+            xi_w,psi_w = torch.meshgrid(par.xi_w,par.psi_w, indexing='ij')
+            
+            nodes = torch.stack((xi.flatten(),psi.flatten()),dim=1)
+            weights = xi_w.flatten()*psi_w.flatten() 
+
+            return nodes,weights
         
-        quad = torch.stack((xi.flatten(),psi.flatten()),dim=1)
-        quad_w = xi_w.flatten()*psi_w.flatten() 
+        else:
 
-        return quad,quad_w
+            xi = np.exp(torch.normal(0.0,par.sigma_xi,size=(par.T-1, train.N, par.Nmc), dtype=dtype,device=device)) # shape (T-1,N,Nmc)
+            psi = np.exp(torch.normal(0.0,par.sigma_psi,size=(par.T-1, train.N, par.Nmc),dtype=dtype,device=device)) # shape (T-1,N,Nmc)    
+
+            nodes = torch.stack((xi, psi), dim=-1) # Stack two vector with random draws -> shape (T-1,N,Nmc,2)
+            weights = torch.ones((par.Nmc,)) / par.Nmc # shape (Nmc,)
+
+            return nodes,weights
     
     #########
     # draw #
@@ -323,7 +329,6 @@ class DurablesModelClass(DLSolverClass):
 
         sigma_m0 = par.sigma_m0
         sigma_p0 = par.sigma_p0
-        sigma_d0 = par.sigma_d0
 
         # a. draw cash-on-hand		
         m0 = par.mu_m0*np.exp(torch.normal(-0.5*sigma_m0**2,sigma_m0,size=(N,)))
@@ -332,7 +337,7 @@ class DurablesModelClass(DLSolverClass):
         p0 = par.mu_p0*np.exp(torch.normal(-0.5*sigma_p0**2,sigma_p0,size=(N,)))
 
         # c. draw initial durables
-        n0s = (par.mu_n0*np.exp(torch.normal(-0.5*sigma_d0**2,sigma_d0,size=(N,))) for _ in range(par.D))
+        n0s = ((torch.zeros(N,)) for _ in range(par.D))
 
         # d. store
         return torch.stack((m0,p0,*n0s),dim=1)
@@ -365,17 +370,23 @@ class DurablesModelClass(DLSolverClass):
     
         return eps
 
-    def draw_exo_actions(self,N):
-        """ draw exogenous actions - need to be changed """
+    def draw_endogenous_states(self):
+        """ Draw endo states for pure backward """
 
         par = self.par
+        train = self.train
+        m_grid = torch.tensor(nonlinspace(0.35,4.0,400,1.3), device=train.device)
+        n_grid = torch.tensor(nonlinspace(0.05,2.5,400,1.1), device=train.device)
+        for t in range(par.T):
 
-        exo_actions = np.zeros((par.T,N,par.Nactions))
+            # cash-on-hand
+            samples_m = sample_uniform_between_grid_points(m_grid, N=train.N, device=train.device)
+            train.states[t, :, 0] = samples_m
 
-        for i_action in range(par.Nactions):
-            exo_actions[:,:,i_action] = torch_uniform(0.1,0.5,(par.T,N))
-    
-        return exo_actions
+            # durables
+            for i_d in range(par.D):
+                samples_n = sample_uniform_between_grid_points(n_grid, N=train.N, device=train.device)
+                train.states[t,:,2+i_d] = samples_n
 
     ###################
     # model functions #
@@ -390,12 +401,43 @@ class DurablesModelClass(DLSolverClass):
         
     state_trans_pd = model_funcs.state_trans_pd
     state_trans = model_funcs.state_trans
-    exploration = model_funcs.exploration
+    
+    def exploration(self,states,actions,eps,t=None):
 
-    marginal_reward = model_funcs.marginal_reward
-    marginal_terminal_reward = model_funcs.marginal_terminal_reward
+        par = self.par
+
+        if not par.use_softmax:
+
+            return actions+eps
+        
+        else:
+
+            if par.KKT:
+                shares = actions[...,:par.D+2]
+            else:
+                shares = actions
+                
+            log_shares = torch.log(shares + 1e-8)
+
+            fac = (par.D+2)/np.sqrt(1-1/(par.D+2))
+            shares_exp = torch.softmax(log_shares + fac*eps[...,:par.D+2],dim=-1)
+            
+            if par.KKT:
+                mults = actions[...,par.D+2:] + eps[..., par.D+2:]
+                return torch.cat((shares_exp,mults),dim=-1)            
+            else:
+                return shares_exp
+
+    # DeepFOC
     eval_equations_FOC = model_funcs.eval_equations_FOC
+    eval_equations_FOC_terminal = model_funcs.eval_equations_FOC_terminal
+    eval_equations_FOC_t = model_funcs.eval_equations_FOC_t
+
+    # DeepVPD-FOC
+    marginal_reward = model_funcs.marginal_reward
+    terminal_marginal_reward_pd = model_funcs.terminal_marginal_reward_pd
     eval_equations_VPD = model_funcs.eval_equations_VPD
+    eval_equations_VPD_terminal = model_funcs.eval_equations_VPD_terminal
 
     def add_transfer(self,transfer):
         """ add transfer to initial states """
@@ -436,7 +478,7 @@ class DurablesModelClass(DLSolverClass):
                 states_pd = self.state_trans_pd(states,actions,outcomes)
 
                 # c. next-period states
-                states_next = self.state_trans(states_pd,train.quad)
+                states_next = self._state_trans(states_pd)
 
                 # d. next-period action
                 actions_next = self.eval_policy(self.policy_NN,states_next,t0=1)
@@ -450,14 +492,14 @@ class DurablesModelClass(DLSolverClass):
                 marg_util_next = model_funcs.marg_util_c(c_next,d_next,par,train)
 
                 # g. expected marginal utility next period
-                exp_marg_util_next = torch.sum(train.quad_w[None,None,:]*marg_util_next, dim=-1)
+                exp_marg_util_next = torch.sum(train.numint_weights[None,None,:]*marg_util_next, dim=-1)
 
                 # h. euler error
                 euler_error_Nbatch = model_funcs.inv_marg_util_c(par.R*par.beta*exp_marg_util_next,d,par,train) / c - 1
                 euler_error_Nbatch = torch.abs(euler_error_Nbatch)
                 sim.euler_error[:par.T-1,index_start:index_end] = euler_error_Nbatch
 
-    def compute_MPC(self,Nbatch_share=0.01):
+    def compute_MPC_MPX(self,Nbatch_share=0.01):
         """ compute MPC """
 
         par = self.par
@@ -468,6 +510,8 @@ class DurablesModelClass(DLSolverClass):
             # a. baseline
             c = sim.outcomes[...,0]
             d = sim.outcomes[...,1:1+par.D]
+            Delta_n = d - sim.states[...,2:2+par.D]
+            d_adj_cost = model_funcs.d_adj_cost(par,Delta_n)
 
             # b. add windfall
             states = deepcopy(sim.states)
@@ -491,6 +535,7 @@ class DurablesModelClass(DLSolverClass):
             # c. MPC
             sim.MPC_c[:,:] = (c_alt-c)/par.Delta_MPC
             sim.MPC_d[:,:,:] = (d_alt-d)/par.Delta_MPC
+            sim.MPX[:,:] = sim.MPC_c + torch.sum(sim.MPC_d * (1 + d_adj_cost), dim=-1)
 
     #######
     # DDP #
@@ -512,3 +557,23 @@ class DurablesModelClass(DLSolverClass):
         train.quad = train.quad.to(device_send)
         train.quad_w = train.quad_w.to(device_send)
         train.scale_vec = train.scale_vec.to(device_send)
+
+
+def sample_uniform_between_grid_points(m_grid, N, device):
+
+    M = len(m_grid)
+
+    # 1. Uniformly choose one of the M-1 intervals
+    interval_idx = torch.randint(low=0, high=M - 1, size=(N,), device=device)
+
+    # 2. Draw uniform value for interpolation
+    u = torch.rand(N, device=device)
+
+    # 3. Get left and right grid points
+    left = m_grid[interval_idx]
+    right = m_grid[interval_idx + 1]
+
+    # 4. Interpolate within the interval
+    samples = (1 - u) * left + u * right
+
+    return samples

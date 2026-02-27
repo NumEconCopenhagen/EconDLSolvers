@@ -1,3 +1,4 @@
+import time
 import numpy as np
 
 import torch
@@ -8,167 +9,312 @@ import torch.nn.functional as F
 # eval #
 ########
 
-def eval_NN(NN,NNT,x,scale_vec=None,t0=0,t=None):
+def eval_NN(model,NN,x,t0=0,t=None):
 
-    # a. scale
-    if scale_vec is not None: x = x*scale_vec
+    par = model.par
+    train = model.train
 
-    # b. add time dummies
-    if t is not None:
+    # a. time indices
+    if not t is None:
 
-        # x.shape = (Nx,Ninputs)
+        # x.shape = (N,Ninputs)
 
-        Nx = x.shape[0]
+        T = 1
+        if train.backward:
+            x_ = x.reshape((-1,x.shape[-1])) # x_.shape = (T,N,Ninputs)
+        else:
+            x_ = x
+        N = x_.shape[0]
 
-        time_dummies = torch.zeros((Nx,NNT),dtype=x.dtype,device=x.device)
-        time_dummies[:,t] = 1
-        
-        x_time_dummies = torch.cat((x,time_dummies),dim=-1) # shape = (Nx,Ninputs+NNT)	
 
-        return NN(x_time_dummies) # shape = (Nx,Noutputs)
-    
+        time_indices = torch.tensor([t]*N,dtype=torch.long,device=x.device) # shape = (N,) 
+
     else:
-        
+
         # x.shape = (T,...,Ninputs)
 
-        x_ = x.reshape((x.shape[0],-1,x.shape[-1])) # shape = (T,Nx,Ninputs)
+        x_ = x.reshape((x.shape[0],-1,x.shape[-1])) # x_.shape = (T,N,Ninputs)
 
         T = x_.shape[0]
-        Nx = x_.shape[1]
+        N = x_.shape[1]
 
-        eyeT = torch.eye(NNT,NNT,dtype=x.dtype,device=x.device)[t0:t0+T,:] # shape = (T,NNT)
-        eyeT = eyeT.repeat_interleave(Nx,dim=0).reshape((T,Nx,NNT)) # shape = (T,Nx,NNT)
+        time_indices = torch.arange(t0,t0+T,dtype=torch.long,device=x_.device) # shape = (T,)
+        time_indices = time_indices.repeat_interleave(N) # shape = (T*N,)
+            
+   # b. time input
+    if train.time_input_type == 'one_hot':
+        time_inputs = F.one_hot(time_indices,par.T) # shape = (T*N,Ninputs_time)            
+    elif train.time_input_type == 'embedding':
+        time_inputs = NN.time_embedding(time_indices) # shape = (T*N,Ninputs_time)        
+    elif train.time_input_type == 'manual':
+        time_inputs = model.time_inputs(time_indices) # shape = (T*N,Ninputs_time)
+    else:
+        raise ValueError(f'time_input_type {train.time_input_type} not available')
+        
+    # c. input transformation
+    if train.input_transformation:
+        x_full = model.input_transformation(x,t=t,t0=t0) # x_full.shape = (T,N,Ninputs_all)
+    else:
+        x_full = x
 
-        x_time_dummies = torch.cat((x_,eyeT),dim=-1) # shape = (T,Nx,Ninputs+NNT)
-        x_time_dummies = x_time_dummies.reshape((T*Nx,-1)) # shape = (T*Nx,Ninputs+NNT)		
+    # d. combine
+    x_full = x_full.reshape((T*N,-1)) # x_full.shape = (T*N,Ninputs_all)
+    x_with_time = torch.cat((x_full,time_inputs),dim=-1) # shape = (N,Ninputs_all+Ninputs_time)	
 
-        return NN(x_time_dummies).reshape(*x.shape[:-1],-1) # shape = (T,...,Noutputs)
-    
+    # e. return
+    y = NN(x_with_time)
+    return y.reshape(*x.shape[:-1],-1) # shape = (T,...,Noutputs)
+
+def eval_NN_t(model,NN,x,t=None):
+
+    par = model.par
+    train = model.train
+        
+    # a. input transformation
+    if train.input_transformation:
+        x_full = model.input_transformation(x,t=t) # x_full.shape = (T,N,Ninputs_all)
+    else:
+        x_full = x
+
+    # b. evaluate network
+    y = NN(x_full)
+    return y.reshape(*x.shape[:-1],-1) # shape = (T,...,Noutputs)
+
 ##########
-# Policy #
+# policy #
 ##########
 
 class Policy(nn.Module):
     """ Policy function """
     
-    def __init__(self,par,train):
+    def __init__(self,par,train,backward=False,normal_init=False,manual_initialization=None):
 
         super(Policy,self).__init__()
 
-        self.Nstates = par.Nstates
-        self.T = par.T
-        self.Nactions = par.Nactions
+        # inputs
+        Ninputs = par.Nstates + train.Ninputs_aux 
+        if not backward: Ninputs += train.Ninputs_time
+
+        # outputs
+        Noutputs = par.Nactions
+
+        if backward:
+            Nneurons = train.Nneurons_policy_t
+        else:
+            Nneurons = train.Nneurons_policy
+
+        # activation functions
         self.intermediate_activation = getattr(F,train.policy_activation_intermediate)
 
-        self.layers = nn.ModuleList([None]*(train.Nneurons_policy.size+1))
+        # time embedding layer
+        if train.time_input_type == 'embedding' and not backward:
+            self.time_embedding = nn.Embedding(par.T,train.Ninputs_time)
+
+        # standard layers
+        self.layers = nn.ModuleList([None]*(Nneurons.size+1))
     
         # input layer
-        self.layers[0] = nn.Linear(self.Nstates+self.T, train.Nneurons_policy[0])
+        self.layers[0] = nn.Linear(Ninputs,Nneurons[0])
 
         # hidden layers
         for i in range(1,len(self.layers)-1):
-            self.layers[i] = nn.Linear(train.Nneurons_policy[i-1],train.Nneurons_policy[i])
+            self.layers[i] = nn.Linear(Nneurons[i-1],Nneurons[i])
         
         # output layer
-        self.layers[-1] = nn.Linear(train.Nneurons_policy[-1],self.Nactions)
+        self.layers[-1] = nn.Linear(Nneurons[-1],Noutputs)
+
+        # manual initialization
+        if manual_initialization is not None: 
+            manual_initialization(self.layers)
+
+        # initialize weights
+        if backward and normal_init: self.apply(make_low_variance_init(std=train.NN_init_std))
         
-        if len(train.policy_activation_final) == 1:
-            
-            if hasattr(F,train.policy_activation_final[0]):
-                self.policy_activation_final = getattr(F,train.policy_activation_final[0])
-            else:
-                raise ValueError(f'policy_activation_final {train.policy_activation_final[0]} function not available')
-
-        else:
-
-            self.policy_activation_final = []
-
-            for i in range(len(train.policy_activation_final)):
-
-                if train.policy_activation_final[i] == None:
-                    self.policy_activation_final.append(None)
-                else:
-                    if hasattr(F,train.policy_activation_final[i]):
-                        self.policy_activation_final.append(getattr(F,train.policy_activation_final[i]))
-                    else:
-                        raise ValueError(f'policy_activation_final {train.policy_activation_final[i]} function not available')
-
-    def forward(self,state):
+    def forward(self,inputs):
         """ Forward pass"""
 
         # input layer
-        s = self.intermediate_activation(self.layers[0](state))
+        s = self.intermediate_activation(self.layers[0](inputs))
     
         # hidden layers
         for i in range(1,len(self.layers)-1):
             s = self.intermediate_activation(self.layers[i](s))
 
         # output layer
-        if type(self.policy_activation_final) is not list:
-
-            action = self.policy_activation_final(self.layers[-1](s))
-
-        else:
-
-            s_noact = self.layers[-1](s) # output layer without activation
-            for i_a in range(self.Nactions): # apply activation to each action
-                if self.policy_activation_final[i_a] is None:
-                    action_i_a = s_noact[:,i_a].view(-1,1)
-                else:
-                    action_i_a = self.policy_activation_final[i_a](s_noact[:,i_a].view(-1,1))
-                if i_a == 0:
-                    action = action_i_a
-                else:
-                    action = torch.cat([action, action_i_a], 1)
-
-        return action
+        return self.layers[-1](s)
 
 def eval_policy(model,NN,states,t0=0,t=None):
 
     par = model.par
     train = model.train
 
-    if train.use_input_scaling: 
-        scale_vec = model.par.scale_vec_states
-    else:
-        scale_vec = None
+    # a. raw actions
+    actions_raw = eval_NN(model,NN,states,t0,t)
 
-    actions = eval_NN(NN,par.T,states,scale_vec,t0,t)
+    # b. apply final activation functions
+    actions_list = []
+
+    if type(train.policy_activation_final) is list:
+
+        if train.policy_activation_final is None or (not train.policy_activation_final[0] == 'softmax'):
+
+            for i in range(par.Nactions): # apply activation to each action
+
+                # i. find activation function
+                if train.policy_activation_final[i] is None:
+                    f = None
+                elif hasattr(F,train.policy_activation_final[i]):
+                    f = getattr(F,train.policy_activation_final[i])
+                else:
+                    raise ValueError(f'policy_activation_final {train.policy_activation_final[i]} function not available')
+                
+                # ii. apply activation function
+                if f is None:
+                    action_i = actions_raw[...,i]
+                else:
+                    action_i = f(actions_raw[...,i])
+
+                # iii. append
+                actions_list.append(action_i[...,None])
+
+        else:
+
+            Nsoftmax = 0
+            for i in range(par.Nactions):
+                if train.policy_activation_final[i] == 'softmax':
+                    Nsoftmax += 1
+                else:
+                    break
+
+            actions_softmax = F.softmax(actions_raw[...,:Nsoftmax],dim=-1)
+
+            for i in range(par.Nactions): # apply activation to each action
+
+                if i < Nsoftmax:
+                    
+                    action_i = actions_softmax[...,i]                    
+
+                else:
+
+                    # i. find activation function
+                    if train.policy_activation_final[i] is None:
+                        f = None
+                    elif hasattr(F,train.policy_activation_final[i]):
+                        f = getattr(F,train.policy_activation_final[i])
+                    else:
+                        raise ValueError(f'policy_activation_final {train.policy_activation_final[i]} function not available')
+                    
+                    # ii. apply activation function
+                    if f is None:
+                        action_i = actions_raw[...,i]
+                    else:
+                        action_i = f(actions_raw[...,i])
+
+                # iii. append
+                actions_list.append(action_i[...,None])
+
+        actions = torch.cat(actions_list,dim=-1)
+
+    else:
+        
+        # if policy_activation_final is not a list, apply the same activation to all actions
+        f = getattr(F,train.policy_activation_final)
+        if train.policy_activation_final == 'softmax':
+            actions = f(actions_raw,dim=-1)
+        else:
+            actions = f(actions_raw)
+    
+    # c. clamp and return
+    actions = actions.clamp(train.min_actions,train.max_actions)
+
+    return actions
+
+def eval_policy_t(model,NN,states,t=None):
+
+    par = model.par
+    train = model.train
+
+    # a. raw actions
+    if train.use_simult_in_backward:
+        actions_simult = eval_NN(model,model.policy_NN,states,t=t)
+    else:
+        actions_simult = 0.0
+    
+    actions_t = eval_NN_t(model,NN,states,t=t)
+
+    actions_raw = actions_t + actions_simult
+
+    # b. apply final activation functions
+    actions_list = []
+
+    for i in range(par.Nactions): # apply activation to each action
+
+        # i. find activation function
+        if train.policy_activation_final[i] is None:
+            f = None
+        elif hasattr(F,train.policy_activation_final[i]):
+            f = getattr(F,train.policy_activation_final[i])
+        else:
+            raise ValueError(f'policy_activation_final {train.policy_activation_final[i]} function not available')
+        
+        # ii. apply activation function
+        if f is None:
+            action_i = actions_raw[...,i]
+        else:
+            action_i = f(actions_raw[...,i])
+
+        # iii. append
+        actions_list.append(action_i[...,None])
+    
+    actions = torch.cat(actions_list,dim=-1).reshape(actions_raw.shape)
+
+    # c. clamp and return
     actions = actions.clamp(train.min_actions,train.max_actions)
 
     return actions
 
 #########
-# Value #
+# value #
 #########
 
 class StateValue(nn.Module):
     """ Value function """
 
-    def __init__(self,par,train,outputs=1):
+    def __init__(self,par,train,Noutputs=1,backward=False,normal_init=False):
         
         super(StateValue, self).__init__()
 
+        # inputs
         if train.algoname == 'DeepVPD' or train.algoname == 'DeepVPDDC':
-            self.Nstates = par.Nstates_pd
+            Nstates = par.Nstates_pd
         else:
-            self.Nstates = par.Nstates
+            Nstates = par.Nstates
 
-        self.T = par.T
+
+        Ninputs = Nstates + train.Ninputs_aux 
+        if not backward: Ninputs += train.Ninputs_time
+
+        # activation functions
         self.intermediate_activation = getattr(F,train.value_activation_intermediate)
-        self.outputs = outputs
         
+        # time embedding layer
+        if train.time_input_type == 'embedding':
+            self.time_embedding = nn.Embedding(par.T,train.Ninputs_time)
+
+        # standard layers
         self.layers =  nn.ModuleList([None]*(train.Nneurons_value.size+1))
     
         # input layer
-        self.layers[0] = nn.Linear(self.Nstates+self.T,train.Nneurons_value[0])
+        self.layers[0] = nn.Linear(Ninputs,train.Nneurons_value[0])
 
         # hidden layers
         for i in range(1,len(self.layers)-1):
-            self.layers[i] = nn.Linear(train.Nneurons_value[i-1], train.Nneurons_value[i])
+            self.layers[i] = nn.Linear(train.Nneurons_value[i-1],train.Nneurons_value[i])
 
         # output layer
-        self.layers[-1] = nn.Linear(train.Nneurons_value[-1], outputs)
+        self.layers[-1] = nn.Linear(train.Nneurons_value[-1],Noutputs)
+
+        if backward and normal_init: self.apply(make_low_variance_init(std=train.NN_init_std))
 
     def forward(self, state):
         """ Forward pass"""
@@ -185,309 +331,56 @@ class StateValue(nn.Module):
         # output layer
         return self.layers[-1](s)
 
-def eval_value(model,NN,states,t0=0,t=None):
+def eval_value(model,NN,states_pd,t0=0,t=None):
 
     par = model.par
     train = model.train
 
-    if train.use_input_scaling: 
-        scale_vec = model.par.scale_vec_states
-    else:
-        scale_vec = None
-
     if isinstance(NN,list):
         values = []
         for j in range(train.N_value_NN):
-            value_j = eval_NN(NN[j],par.T,states,scale_vec,t0,t)
-            values.append(value_j)
-        value = torch.mean(torch.stack(values,dim=0),dim=0)
-    else:
-        value = eval_NN(NN,par.T,states,scale_vec,t0,t)
-    
-    return value
-
-def eval_value_pd(model,NN,states_pd,t0=0,t=None):
-
-    par = model.par
-    train = model.train
-
-    if train.use_input_scaling: 
-        scale_vec = model.par.scale_vec_states_pd
-    else:
-        scale_vec = None
-
-    if isinstance(NN,list):
-        values = []
-        for j in range(train.N_value_NN):
-            value_j = eval_NN(NN[j],par.T,states_pd,scale_vec,t0,t)
+            value_j = eval_NN(model,NN[j],states_pd,t0,t)
             values.append(value_j)
         value_pd = torch.mean(torch.stack(values,dim=0),dim=0)
     else:
-        value_pd = eval_NN(NN,par.T,states_pd,scale_vec,t0,t)
+        value_pd = eval_NN(model,NN,states_pd,t0,t)
     
     return value_pd
 
-#####
-# Q #
-#####
-
-class ActionValue(nn.Module):
-    """ Value function """
-
-    def __init__(self,par,train):
-        
-        super(ActionValue, self).__init__()
-
-        self.Nstates = par.Nstates
-        self.T = par.T
-        self.Nactions = par.Nactions
-        self.intermediate_activation = getattr(F,train.value_activation_intermediate)
-
-        self.layers =  nn.ModuleList([None]*(train.Nneurons_value.size+1))
-        input_dim = par.Nstates + self.T + par.Nactions
-
-        # input layer
-        self.layers[0] = nn.Linear(input_dim, train.Nneurons_value[0])
-
-        # hidden layers
-        for i in range(1,len(self.layers)-1):
-            self.layers[i] = nn.Linear(train.Nneurons_value[i-1], train.Nneurons_value[i])
-
-        # output layer
-        self.layers[-1] = nn.Linear(train.Nneurons_value[-1], 1)
-
-    def forward(self, state, action):
-        """ Forward pass"""
-
-        # concatenate state and action
-        state_action = torch.cat([state, action], 1)
-
-        # input layer
-        s = self.intermediate_activation(self.layers[0](state_action))
-
-        # hidden layers
-        for i in range(1,len(self.layers)-1):
-            s = self.intermediate_activation(self.layers[i](s))
-        
-        # output layer
-        return self.layers[-1](s)
-
-class StateValueDouble(nn.Module):
-    """ Double Q value network"""
-
-    def __init__(self,par,train):
-
-        super(StateValueDouble, self).__init__()
-
-        self.Nstates = par.Nstates
-        self.T = par.T
-        self.intermediate_activation = getattr(F,train.value_activation_intermediate)
-
-        # layers for both Q1 and Q2 networks
-        self.layers =  nn.ModuleList([None]*(train.Nneurons_value.size+1)*2)
-        self.network_depth = len(self.layers)//2 # number of layers in each Q network
-        
-        input_dim = self.Nstates+self.T
-
-        # Q1 architecture
-
-        # input layer
-        self.layers[0] = nn.Linear(input_dim, train.Nneurons_value[0])
-
-        # hidden layers
-        for i in range(1,self.network_depth-1):
-            self.layers[i] = nn.Linear(train.Nneurons_value[i-1], train.Nneurons_value[i])
-
-        # output layer
-        self.layers[self.network_depth-1] = nn.Linear(train.Nneurons_value[-1], 1)
-
-        # Q2 architecture
-
-        # input layer
-        self.layers[self.network_depth] = nn.Linear(input_dim, train.Nneurons_value[0])
-
-        # hidden layers
-        for i in range(self.network_depth+1,len(self.layers)-1):
-            Nneurons_index = i - self.network_depth
-            self.layers[i] = nn.Linear(train.Nneurons_value[Nneurons_index-1], train.Nneurons_value[Nneurons_index])
-
-        # output layer
-        self.layers[-1] = nn.Linear(train.Nneurons_value[-1], 1)		
-
-    def forward(self, state):
-        """ Forward pass of both Q1 and Q2"""
-        
-        # Q1 forward pass
-
-        # input layer
-        s = self.intermediate_activation(self.layers[0](state))
-
-        # hidden layers
-        for i in range(1,self.network_depth-1):
-            s = self.intermediate_activation(self.layers[i](s))
-
-        # output layer
-        v1 = self.layers[self.network_depth-1](s)
-
-        # Q2 forward pass
-
-        # input layer
-        s = self.intermediate_activation(self.layers[self.network_depth](state))
-
-        # hidden layers
-        for i in range(self.network_depth+1,len(self.layers)-1):
-            s = self.intermediate_activation(self.layers[i](s))
-
-        # output layer
-        v2 = self.layers[-1](s)
-
-        return v1, v2
-
-    def V1(self, state):
-        """ Forward pass of V1"""
-        
-        # V1 forward pass
-
-        # input layer
-        s = self.intermediate_activation(self.layers[0](state))
-
-        # hidden layers
-        for i in range(1,self.network_depth-1):
-            s = self.intermediate_activation(self.layers[i](s))
-
-        # output layer
-        v1 = self.layers[self.network_depth-1](s)
-
-        return v1
-
-class ActionValueDouble(nn.Module):
-    """ Double Q value network"""
-
-    def __init__(self,par,train):
-
-        super(ActionValueDouble, self).__init__()
-
-        self.Nstates = par.Nstates
-        self.T = par.T
-        self.Nactions = par.Nactions
-        self.intermediate_activation = getattr(F,train.value_activation_intermediate)
-
-        # layers for both Q1 and Q2 networks
-        self.layers =  nn.ModuleList([None]*(train.Nneurons_value.size+1)*2)
-
-        self.network_depth = len(self.layers)//2 # number of layers in each Q network
-        input_dim = self.Nstates + self.T + self.Nactions
-
-        # Q1 architecture
-
-        # input layer
-        self.layers[0] = nn.Linear(input_dim, train.Nneurons_value[0])
-
-        # hidden layers
-        for i in range(1,self.network_depth-1):
-            self.layers[i] = nn.Linear(train.Nneurons_value[i-1], train.Nneurons_value[i])
-
-        # output layer
-        self.layers[self.network_depth-1] = nn.Linear(train.Nneurons_value[-1], 1)
-
-        # Q2 architecture
-
-        # input layer
-        self.layers[self.network_depth] = nn.Linear(input_dim, train.Nneurons_value[0])
-
-        # hidden layers
-        for i in range(self.network_depth+1,len(self.layers)-1):
-            Nneurons_index = i - self.network_depth
-            self.layers[i] = nn.Linear(train.Nneurons_value[Nneurons_index-1], train.Nneurons_value[Nneurons_index])
-
-        # output layer
-        self.layers[-1] = nn.Linear(train.Nneurons_value[-1], 1)		
-
-    def forward(self, state, action):
-        """ Forward pass of both Q1 and Q2"""
-        
-        # concatenate state and action
-        state_action = torch.cat([state, action], 1)
-
-        # Q1 forward pass
-
-        # input layer
-        s = self.intermediate_activation(self.layers[0](state_action))
-
-        # hidden layers
-        for i in range(1,self.network_depth-1):
-            s = self.intermediate_activation(self.layers[i](s))
-
-        # output layer
-        q1 = self.layers[self.network_depth-1](s)
-
-        # Q2 forward pass
-
-        # input layer
-        s = self.intermediate_activation(self.layers[self.network_depth](state_action))
-
-        # hidden layers
-        for i in range(self.network_depth+1,len(self.layers)-1):
-            s = self.intermediate_activation(self.layers[i](s))
-
-        # output layer
-        q2 = self.layers[-1](s)
-
-        return q1, q2
-
-    def Q1(self, state, action):
-        """ Forward pass of Q1"""
-
-        # concatenate state and action
-        state_action = torch.cat([state, action], 1)
-
-        # Q1 forward pass
-
-        # input layer
-        s = self.intermediate_activation(self.layers[0](state_action))
-
-        # hidden layers
-        for i in range(1,self.network_depth-1):
-            s = self.intermediate_activation(self.layers[i](s))
-            
-        # output layer
-        q1 = self.layers[self.network_depth-1](s)
-
-        return q1
-    
-def eval_actionvalue(model,states,action,value_NN,t0=0,Q1=False):
-
-    # states.shape = (T,...,Nstates)
+def eval_value_t(model,NN,states_pd,t0=0,t=None):
 
     par = model.par
     train = model.train
 
-    # a. scale
-    if train.use_input_scaling: states *= model.par.scale_vec_states
-
-    # b. add time dummies
-    states_ = states.reshape((states.shape[0],-1,states.shape[-1])) # shape = (T,N,Nstates)
-
-    T = states_.shape[0]
-    N = states_.shape[1]
-    NNT = par.T
-
-    eyeT = torch.eye(NNT,NNT,dtype=states_.dtype,device=states_.device)[t0:t0+T,:]  # shape = (T,NNT)
-    eyeT = eyeT.repeat_interleave(N,dim=0).reshape((T,N,NNT)) # shape = (T,N,NNT)
-
-    states_time_dummies = torch.cat((states_,eyeT),dim=-1) # shape = (T,N,Nstates+NNT)
-    states_time_dummies = states_time_dummies.reshape((T*N,-1)) # shape = (T*N,Nstates+NNT)
-
-    actions_ = action.reshape(-1,action.shape[-1]) # shape = (T*N,Nactions)
-    if train.DoubleQ:
-        if Q1:
-            value = value_NN.Q1(states_time_dummies,actions_) # shape (T*N,1)
-
-            return value.reshape(*states.shape[:-1],1) # shape = (T,...,1)
+    if train.use_simult_in_backward:
+        if train.N_value_NN is None:
+            value_simult = eval_NN(model,model.value_NN,states_pd,t=t)
         else:
-            value1, value2 = value_NN(states_time_dummies,actions_)
-            return value1.reshape(*states.shape[:-1],1), value2.reshape(*states.shape[:-1],1)
+            values = []
+            for j in range(train.N_value_NN):
+                value_j = eval_NN(model,model.value_NNs[j],states_pd,t=t)
+                values.append(value_j)
+            value_simult = torch.mean(torch.stack(values,dim=0),dim=0)
     else:
-        value = value_NN(states_time_dummies,actions_) # shape (T*N,1)
+        value_simult = 0.0
+    
+    value_t = eval_NN_t(model,NN,states_pd,t=t) # shape stated_pd when DeepVPDDC backward = (Nbatch,Nstates_pd,NDC)
+    
+    value = value_t + value_simult
+    
+    return value
 
-        return value.reshape(*states.shape[:-1],1) # shape = (T,...,1)
+###############################
+# low variance initialization #
+###############################
+
+def make_low_variance_init(std):
+
+    def init_fn(module):
+    
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight,mean=0.0,std=std)
+            if module.bias is not None:
+                nn.init.constant_(module.bias,0.0)
+
+    return init_fn

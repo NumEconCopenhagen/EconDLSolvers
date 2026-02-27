@@ -7,29 +7,17 @@ import numpy as np
 import torch
 torch.set_warn_always(True)
 
+# EconModel and consav
 from EconModel import EconModelClass, jit
-from consav.grids import nonlinspace # grids
-
-from BufferStockModel import BufferStockModelClass
+from consav.grids import nonlinspace
 
 # local
-from egm import EGM, simulate, compute_euler_errors
+from BufferStockModel import BufferStockModelClass
+from BufferStockModel import BufferStockMoreShocksModelClass
+from egm import EGM, simulate, simulate_MoreShocks, compute_euler_errors
 
-def select_euler_errors_EGM(model):
-    """ compute mean euler error """
-
-    par = model.par
-    sim = model.sim
-
-    c = sim.outcomes[:par.T_retired,:,0]
-    states = sim.states
-    actions = 1-c/states[:par.T_retired,:,0]  
-
-    savings_indicator = (actions > par.Euler_error_min_savings)
-    
-    return sim.euler_error[:par.T_retired,:][savings_indicator]
-
-class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
+# class
+class BufferStockModelEGMClass_(EconModelClass):
 
     def settings(self):
         """ basic settings """
@@ -60,8 +48,8 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
         sim = self.sim
 
         # a. from BufferStockModelClass
-        super().setup(full=True)
         self._setup_default()
+        super().setup(full=True)
 
         # b. egm
         egm.Nm_pd = 200 # number of grid points
@@ -71,7 +59,7 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
         egm.Nsigma_xi = 15 # number of grid points
         egm.Nrho_p = 15 # number of grid points
 
-        egm.m_max = 20.0 # max cash-on-hand
+        egm.m_max = 60.0 # max cash-on-hand
         egm.p_max = 10.0 # max permanent income
         egm.p_min = 0.1 # min permanent income
 
@@ -134,6 +122,10 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
     def solve_EGM(self):
         """ solve with EGM """
 
+        
+        if self.par.MoreShocks:         
+            raise NotImplementedError('EGM solution in numba for MoreShocks model is not implemented.')
+
         with jit(self) as model:
 
             par = model.par
@@ -154,7 +146,10 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
 
         # a. simulate
         with jit(self) as model:
-            simulate(model.par,model.egm,model.sim,final=final)
+            if par.MoreShocks:
+                simulate_MoreShocks(model.par,model.egm,model.sim,final=final)
+            else:
+                simulate(model.par,model.egm,model.sim,final=final)
 
         # b. compute R
         beta = par.beta 
@@ -162,7 +157,6 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
         for t in range(par.T):
             beta_t[t] = beta**t
 
-        c = sim.outcomes[:,:,0]
         sim.R = np.sum(beta_t*sim.reward)/sim.N
 
     def simulate_Rs(self):
@@ -194,7 +188,7 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
 
         # c. reset
         self.sim = old_sim
-           
+        
     def compute_transfer_func(self):
         """ compute EGM utility for different transfer levels"""
 
@@ -214,6 +208,36 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
             sim = self.sim = sim_ # reset
 
         sim.R_transfer = R_transfer
+
+    def compute_transfer_funcs(self):
+        """ simulate life time reward for different transfer levels """
+
+        # a. remember
+        old_sim = self.sim
+        Rs = self.info['Rs'] = np.zeros(self.sim.reps)
+
+        # b. loop
+        for rep in range(self.sim.reps):
+
+            # i. set rng
+            torch.set_rng_state(self.torch_rng_state[('sim',rep)])
+
+            # ii. draw
+            self.sim = deepcopy(self.sim)
+            self.sim.states[0] = self.draw_initial_states(self.sim.N).numpy()
+            self.sim.shocks[:,:] = self.draw_shocks(self.sim.N).numpy()
+
+            # iii. simulate
+            self.simulate_R()
+
+            # iv. compute R_transfer
+            self.compute_transfer_func()
+
+            Rs[rep] = self.sim.R
+            old_sim.R_transfers[rep] = self.sim.R_transfer
+
+        # c. reset
+        self.sim = old_sim
     
     def compute_euler_errors(self):
         """ compute euler error """
@@ -233,7 +257,10 @@ class BufferStockModelEGMClass(EconModelClass,BufferStockModelClass):
 
         # b. save to disc
         with open(f'{filename}', 'wb') as f:
-            pickle.dump(model_dict, f)	
+            torch.save(model_dict, f)
+
+class BufferStockModelEGMClass(BufferStockModelEGMClass_,BufferStockModelClass):
+    pass
 
 def select_euler_errors_EGM(model):
     """ compute mean euler error """
@@ -255,3 +282,22 @@ def mean_log10_euler_error_working_EGM(model):
     I = np.isclose(np.abs(euler_errors),0.0)
 
     return np.mean(np.log10(np.abs(euler_errors[~I])))
+
+##############
+# MoreShocks #
+##############
+
+class BufferStockMoreShocksModelEGMClass(BufferStockModelEGMClass_,BufferStockMoreShocksModelClass):
+
+    def setup(self):
+        """ choose parameters """
+
+        par = self.par
+        egm = self.egm
+        sim = self.sim
+
+        super().setup()
+
+        egm.Nsigma_psi = 1 # number of grid points
+        egm.Nsigma_xi = 1 # number of grid points
+        egm.Nrho_p = 1 # number of grid points

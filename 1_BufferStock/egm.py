@@ -329,3 +329,124 @@ def simulate(par,egm,sim,final=False):
 			# iv. fixed states
 			if par.Nstates_fixed > 0:
 				fixed_states[t+1] = fixed_states_pd[t]
+
+def simulate_MoreShocks(par,egm,sim,final=False):
+	""" simulate model """
+
+	# final=True: extra output is produced
+
+	# a. unpack
+	states = sim.states # shape (T,N,Nstates)
+	states_pd = sim.states_pd # shape (T,N,Nstates_pd)
+	actions = sim.actions # shape (T,N,Nactions)
+	outcomes = sim.outcomes # shape (T,N,Noutcomes)
+	shocks = sim.shocks # shape (T,N,Nshocks)
+	reward = sim.reward # shape (T,N,Nstates)
+	MPC = sim.MPC # shape (T,N,Nstates)
+
+	m = states[:,:,0]
+	p = states[:,:,1]
+
+	m_pd = states_pd[:,:,0]
+	p_pd = states_pd[:,:,1]
+
+	savings_rate = actions[:,:,0]
+	
+	xi = shocks[:,:,0]
+	psi = shocks[:,:,1]
+
+	# uniform shocks 
+	u_shock = shocks[:,:,2]
+	mix_xi = shocks[:,:,3]
+	mix_psi = shocks[:,:,4]
+
+	c = outcomes[:,:,0]
+
+	if par.Nstates_fixed > 0:
+		fixed_states = states[:,:,2:]
+		fixed_states_pd = states_pd[:,:,2:]
+
+	if par.Nstates_fixed >= 1:
+		sigma_xi = states[0,:,2]
+	else:
+		sigma_xi = par.sigma_xi_base
+
+	if par.Nstates_fixed >= 2:
+		sigma_psi = states[0,:,3]
+	else:
+		sigma_psi = par.sigma_psi_base
+
+	if par.Nstates_fixed >= 3:
+		rho_p = states[0,:,4]
+	else:
+		rho_p = par.rho_p_base
+	
+	# b. scale shocks
+	sigma_xi = np.where((mix_xi < par.p_xi).astype(bool), par.sigma_xi_1, par.sigma_xi_2)
+	sigma_psi = np.where((mix_psi < par.p_psi).astype(bool), par.sigma_psi_1, par.sigma_psi_2)
+	u = (u_shock < par.p_u).astype(bool)
+
+	xi = np.exp(sigma_xi*xi-0.5*sigma_xi**2)
+	psi = np.exp(sigma_psi*psi-0.5*sigma_psi**2)
+
+	# c. time loop  
+	for t in range(par.T):
+
+		if par.Nstates_fixed > 0: fixed_states_pd[t] = fixed_states[t]
+
+		# a. final period consumption
+		if t == par.T-1:
+
+			c[t] = m[t]/(1+par.beta*par.bequest)
+			if final: MPC[t] = 1.0/(1+par.beta*par.bequest)
+			
+		# b. consumption all other periods
+		else:
+				
+				policy_interp(par,egm,sim.N,t,states[t],c[t])
+				
+				if final:
+
+					states_MPC = np.zeros(states[t].shape)	
+					states_MPC[:] = states[t]
+					states_MPC[:,0] += par.Delta_MPC	
+
+					c_MPC = np.zeros(c[t].shape)	
+					c_MPC[:] = c[t]
+
+					policy_interp(par,egm,sim.N,t,states_MPC,c_MPC)
+				
+					MPC[t] = (c_MPC-c[t])/par.Delta_MPC
+
+		# c. reward
+		reward[t] = utility(par,c[t])
+		if t == par.T-1: reward[t] += par.beta*utility_bequest(par,m[t]-c[t])
+
+		# d. post-decision states
+		m_pd[t] = m[t]-c[t]
+		p_pd[t] = p[t]
+
+		# savings rate
+		savings_rate[t] = m_pd[t]/m[t]
+
+		# e. next period
+		if t < par.T-1:
+
+			# i. permanent income state
+			p[t+1] = (p_pd[t]**rho_p)*xi[t+1]
+			
+			# ii. income
+			if t < par.T_retired:
+				y = par.kappa[t]*p[t+1]*psi[t+1]
+
+				y = np.where(u[t+1], y*par.u_replacement, y)
+
+			else:
+				y = par.kappa[t]
+			
+			# iii. cash-on-hand
+			m[t+1] = par.R*m_pd[t] + y
+
+			# iv. fixed states
+			if par.Nstates_fixed > 0:
+				fixed_states[t+1] = fixed_states_pd[t]
